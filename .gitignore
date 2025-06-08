@@ -1,0 +1,33 @@
+# Byte-compiled / optimized / DLL files
+e-vote-backend/__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environment
+e-vote-backend/venv/
+e-vote-backend/env/
+e-vote-backend/ENV/
+e-vote-backend/.venv/
+e-vote-backend/.ENV/
+
+# VSCode settings (optional)
+.vscode/
+
+# Mac & Windows OS files
+.DS_Store
+Thumbs.db
+
+# Pytest cache
+.pytest_cache/
+
+# MySQL config or secrets (if any are stored separately)
+*.env
+.env*
+
+# Logs
+*.log
+
+# Cache / build
+.cache/
+dist/
+build/
