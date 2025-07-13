@@ -29,18 +29,53 @@ export default function RegisterPage() {
   const [selectedLocation, setSelectedLocation] = useState(locationSets[0]);
   const [message, setMessage] = useState("");
   const [status, setStatus] = useState<"success" | "error" | "">("");
+  const [fingerprintStatus, setFingerprintStatus] = useState<"idle" | "scanning" | "success" | "fail">("idle");
+  const [fingerprintTemplate, setFingerprintTemplate] = useState("");
 
   useEffect(() => {
     const emailParam = searchParams.get("email");
     if (emailParam) setEmail(emailParam);
   }, [searchParams]);
 
+  useEffect(() => {
+    let interval: NodeJS.Timeout;
+    if (fingerprintStatus === "scanning") {
+      interval = setInterval(async () => {
+        try {
+          const res = await fetch("http://localhost:8000/api/fingerprint/scan");
+          const data = await res.json();
+
+          if (data.fingerprint) {
+            setFingerprintTemplate(data.fingerprint);
+            setFingerprintStatus("success");
+            setMessage("✅ Fingerprint captured successfully.");
+            setStatus("success");
+            clearInterval(interval);
+          }
+        } catch (err) {
+          setFingerprintStatus("fail");
+          setMessage("❌ Failed to connect to fingerprint server.");
+          setStatus("error");
+          clearInterval(interval);
+        }
+      }, 2000);
+    }
+    return () => clearInterval(interval);
+  }, [fingerprintStatus]);
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setMessage("");
     setStatus("");
 
-    const formData = new FormData(e.target as HTMLFormElement);
+    if (!fingerprintTemplate) {
+      setMessage("❌ Please scan and include fingerprint.");
+      setStatus("error");
+      return;
+    }
+
+    const form = e.target as HTMLFormElement;
+    const formData = new FormData(form);
     const data = {
       full_name: formData.get("full_name"),
       nic: formData.get("nic"),
@@ -49,6 +84,7 @@ export default function RegisterPage() {
       household: formData.get("household"),
       mobile: formData.get("mobile"),
       email: formData.get("email"),
+      fingerprint: fingerprintTemplate,
       location_id: selectedLocation.id,
       administration: selectedLocation.administration,
       electoral: selectedLocation.electoral,
@@ -66,17 +102,28 @@ export default function RegisterPage() {
       const result = await res.json();
       setMessage(result.message);
       setStatus(result.status === "success" ? "success" : "error");
+
+      if (result.status === "success") {
+        setFingerprintStatus("idle");
+        setFingerprintTemplate("");
+        form.reset();
+      }
     } catch (err) {
       setMessage("❌ Unexpected error. Please try again.");
       setStatus("error");
     }
   };
 
+  const handleFingerprintScan = () => {
+    setFingerprintTemplate("");
+    setFingerprintStatus("scanning");
+    setMessage("🔄 Waiting for fingerprint scan from device...");
+  };
+
   return (
     <div className="min-h-screen bg-white flex flex-col items-center px-6 py-10">
       <h1 className="text-3xl font-semibold text-black mb-6">Voter SL</h1>
 
-      {/* Feedback Banner */}
       {message && (
         <div
           className={`w-full max-w-xl px-4 py-3 mb-6 rounded-lg text-sm font-medium transition-all ${
@@ -90,7 +137,7 @@ export default function RegisterPage() {
       )}
 
       <div className="flex flex-col lg:flex-row gap-10 w-full max-w-7xl">
-        {/* Location selection */}
+        {/* Location Picker */}
         <div className="flex flex-col gap-6 w-full lg:w-1/2">
           {locationSets.map((loc) => (
             <button
@@ -99,9 +146,6 @@ export default function RegisterPage() {
               role="radio"
               aria-checked={selectedLocation?.id === loc.id}
               onClick={() => setSelectedLocation(loc)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" || e.key === " ") setSelectedLocation(loc);
-              }}
               className={`text-left cursor-pointer p-6 rounded-lg border shadow-md transition w-full ${
                 selectedLocation?.id === loc.id
                   ? "border-black bg-gray-50"
@@ -120,7 +164,7 @@ export default function RegisterPage() {
           ))}
         </div>
 
-        {/* Registration form */}
+        {/* Form */}
         <form className="w-full lg:w-1/2 flex flex-col gap-4" onSubmit={handleSubmit}>
           <input name="full_name" type="text" placeholder="Full Name (with Surname)" className="input" required />
           <input name="nic" type="text" placeholder="NIC / SLIN No" className="input" required />
@@ -129,6 +173,24 @@ export default function RegisterPage() {
           <input name="household" type="text" placeholder="Household" className="input" required />
           <input name="mobile" type="text" placeholder="Mobile Number" className="input" required />
           <input name="email" type="email" value={email} onChange={(e) => setEmail(e.target.value)} className="input" required />
+
+          {/* Fingerprint Status */}
+          <div className="flex items-center justify-between">
+            <button
+              type="button"
+              onClick={handleFingerprintScan}
+              className="bg-blue-600 text-white px-4 py-2 rounded hover:bg-blue-700"
+            >
+              Scan Fingerprint
+            </button>
+            <p className="text-sm text-zinc-700">
+              Status:{" "}
+              {fingerprintStatus === "idle" && "Not scanned"}
+              {fingerprintStatus === "scanning" && "Scanning..."}
+              {fingerprintStatus === "success" && "Captured ✅"}
+              {fingerprintStatus === "fail" && "Failed ❌"}
+            </p>
+          </div>
 
           <p className="text-sm text-center text-zinc-500">
             By clicking Submit, you agree to our{" "}

@@ -58,21 +58,3 @@ def register(data: RegisterRequest):
 
     return {"status": "success", "message": "Registered successfully"}
 
-
-# ✅ MySQL table
-#
-# CREATE TABLE users (
-#   id INT AUTO_INCREMENT PRIMARY KEY,
-#   full_name VARCHAR(255),
-#   nic VARCHAR(50),
-#   dob DATE,
-#   gender VARCHAR(20),
-#   household VARCHAR(100),
-#   mobile VARCHAR(20),
-#   email VARCHAR(100),
-#   location_id VARCHAR(50),
-#   administration VARCHAR(100),
-#   electoral VARCHAR(100),
-#   polling VARCHAR(100),
-#   gn VARCHAR(100)
-# );
