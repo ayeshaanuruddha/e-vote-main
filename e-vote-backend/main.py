@@ -96,9 +96,9 @@ def admin_login(data: AdminLoginPayload):
         raise HTTPException(status_code=401, detail="Invalid credentials")
     return {"admin_id": result[0], "full_name": result[1]}
 
-# ------------------------------
+
 # Fingerprint APIs
-# ------------------------------
+
 @app.post("/api/fingerprint/scan")
 def scan_fingerprint(data: FingerprintPayload):
     fingerprint_storage["fingerprint"] = data.fingerprint
@@ -119,9 +119,8 @@ def verify_fingerprint(data: FingerVerifyPayload):
         }}
     return {"status": "fail", "message": "Fingerprint not found"}
 
-# ------------------------------
 # User Registration
-# ------------------------------
+
 @app.post("/api/register")
 def register_user(data: RegisterRequest):
     fingerprint_value = data.fingerprint or fingerprint_storage["fingerprint"]
