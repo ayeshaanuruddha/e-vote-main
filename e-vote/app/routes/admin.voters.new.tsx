@@ -4,25 +4,27 @@ import { json, redirect } from "@remix-run/node";
 import { Form, useActionData, useNavigation } from "@remix-run/react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { requireAdmin } from "../utils/session.server";
-import { api, BACKEND_BASE } from "../utils/api.server";
+import { api } from "../utils/api.server";
 
 /* ---------- Types ---------- */
-type FieldErrors = Partial<Record<
-  | "full_name"
-  | "nic"
-  | "dob"
-  | "gender"
-  | "household"
-  | "mobile"
-  | "email"
-  | "location_id"
-  | "administration"
-  | "electoral"
-  | "polling"
-  | "gn"
-  | "fingerprint",
-  string
->>;
+type FieldErrors = Partial<
+  Record<
+    | "full_name"
+    | "nic"
+    | "dob"
+    | "gender"
+    | "household"
+    | "mobile"
+    | "email"
+    | "location_id"
+    | "administration"
+    | "electoral"
+    | "polling"
+    | "gn"
+    | "fingerprint",
+    string
+  >
+>;
 
 type ActionData = {
   ok?: boolean;
@@ -108,6 +110,32 @@ const locationSets = [
 
 type FingerStatus = "idle" | "scanning" | "success" | "fail";
 
+/* ---------- Client helpers (no any) ---------- */
+// Let TS know we might attach a runtime override on window, without using `any`.
+declare global {
+  interface Window {
+    __VITE_BACKEND_BASE__?: string;
+  }
+}
+
+function urlJoin(base: string, path: string): string {
+  const b = base.replace(/\/+$/, "");
+  const p = path.startsWith("/") ? path : `/${path}`;
+  return `${b}${p}`;
+}
+
+function getScanEndpoint(): string {
+  // Prefer Vite env if present
+  const env = (import.meta as unknown as { env?: { VITE_BACKEND_BASE?: string } }).env;
+  const viteBase = env?.VITE_BACKEND_BASE;
+
+  // Optionally allow a runtime global override placed on window (e.g. in entry html)
+  const winBase = typeof window !== "undefined" ? window.__VITE_BACKEND_BASE__ : undefined;
+
+  const base = viteBase ?? winBase;
+  return base ? urlJoin(base, "/api/fingerprint/scan") : "/api/fingerprint/scan";
+}
+
 /* ---------- Page ---------- */
 export default function NewVoter() {
   const actionData = useActionData<ActionData>();
@@ -132,8 +160,9 @@ export default function NewVoter() {
   const elapsedTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const scanStartRef = useRef<number | null>(null);
 
-  const SCAN_POLL_MS = 1000;          // poll every 1s
-  const SCAN_TIMEOUT_MS = 30_000;     // 30s timeout
+  const SCAN_ENDPOINT = getScanEndpoint();
+  const SCAN_POLL_MS = 1000; // 1s
+  const SCAN_TIMEOUT_MS = 30_000; // 30s
 
   useEffect(() => {
     if (fingerStatus !== "scanning") {
@@ -154,7 +183,7 @@ export default function NewVoter() {
           return;
         }
 
-        const res = await fetch(`${BACKEND_BASE}/api/fingerprint/scan`, { method: "GET" });
+        const res = await fetch(SCAN_ENDPOINT, { method: "GET" });
         if (!res.ok) throw new Error(await res.text());
         const data: { fingerprint?: string | null } = await res.json();
 
@@ -181,7 +210,7 @@ export default function NewVoter() {
 
     return stopTimers;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [fingerStatus]);
+  }, [fingerStatus, SCAN_ENDPOINT]);
 
   function stopTimers() {
     if (pollTimerRef.current) clearInterval(pollTimerRef.current);
@@ -192,10 +221,10 @@ export default function NewVoter() {
 
   const startScan = async () => {
     try {
-      // Clear any stale template BEFORE starting a new session
-      await fetch(`${BACKEND_BASE}/api/fingerprint/scan`, { method: "DELETE" });
+      // Clear stale template BEFORE starting a new session
+      await fetch(SCAN_ENDPOINT, { method: "DELETE" });
     } catch {
-      // non-fatal
+      // ignore; not fatal
     }
     setFingerprint("");
     setFingerStatus("scanning");
@@ -211,7 +240,6 @@ export default function NewVoter() {
   const err = actionData?.errors || {};
   const banner = actionData?.message;
 
-  // Use these so ESLint doesn't complain
   const disableSave =
     isSubmitting || fingerStatus === "scanning" || !selectedLocationId || !fingerprint.trim();
   const progressPct = Math.min(100, Math.round((elapsed / SCAN_TIMEOUT_MS) * 100));
@@ -346,7 +374,7 @@ export default function NewVoter() {
                   />
                 )}
               </div>
-              <div className="mt-2 flex items-center gap-2 text-xs text-gray-600">
+              <div className="mt-2 flex items-center gap-2 text-xs text-gray-600" role="status" aria-live="polite">
                 {fingerStatus === "scanning" && <Spinner />}
                 <span>{scanMessage}</span>
                 {fingerStatus === "fail" && (
@@ -362,8 +390,8 @@ export default function NewVoter() {
             </div>
 
             <p className="mt-2 text-xs text-gray-500">
-              Polls <code className="rounded bg-gray-100 px-1 py-0.5">/api/fingerprint/scan</code> on the coordinator
-              until a template is received or timeout (30s).
+              Polls <code className="rounded bg-gray-100 px-1 py-0.5">/api/fingerprint/scan</code> until a template is
+              received or timeout (30s).
             </p>
           </section>
         </div>
@@ -387,7 +415,7 @@ export default function NewVoter() {
           <Field label="Mobile" name="mobile" defaultValue={actionData?.fields?.mobile} />
           <Field label="Email" name="email" type="email" defaultValue={actionData?.fields?.email} />
 
-          {/* Preset mirrors (submitted to backend) */}
+          {/* Preset mirrors */}
           <input type="hidden" name="location_id" value={selectedLocation?.id || ""} />
           <Field label="Administration" name="administration" readOnly defaultValue={selectedLocation?.administration || ""} />
           <Field label="Electoral" name="electoral" readOnly defaultValue={selectedLocation?.electoral || ""} />
@@ -452,7 +480,9 @@ function Field({
         required={required}
         readOnly={readOnly}
         defaultValue={defaultValue}
-        className={`mt-1 w-full rounded-md ${error ? "border-red-300" : "border-gray-300"} ${readOnly ? "bg-gray-50 text-gray-700" : ""}`}
+        className={`mt-1 w-full rounded-md ${error ? "border-red-300" : "border-gray-300"} ${
+          readOnly ? "bg-gray-50 text-gray-700" : ""
+        }`}
       />
       {error && <span className="mt-1 block text-xs text-red-600">{error}</span>}
     </label>
@@ -460,19 +490,11 @@ function Field({
 }
 
 function Spinner() {
-  return (
-    <span
-      aria-hidden
-      className="inline-block h-3 w-3 animate-spin rounded-full border border-gray-300 border-t-gray-700"
-    />
-  );
+  return <span aria-hidden className="inline-block h-3 w-3 animate-spin rounded-full border border-gray-300 border-t-gray-700" />;
 }
 
 function StatusDot({ status }: { status: FingerStatus }) {
   const color =
-    status === "success" ? "bg-green-500" :
-    status === "fail" ? "bg-red-500" :
-    status === "scanning" ? "bg-amber-500" :
-    "bg-gray-400";
+    status === "success" ? "bg-green-500" : status === "fail" ? "bg-red-500" : status === "scanning" ? "bg-amber-500" : "bg-gray-400";
   return <span className={`inline-block h-2.5 w-2.5 rounded-full ${color}`} aria-hidden />;
 }

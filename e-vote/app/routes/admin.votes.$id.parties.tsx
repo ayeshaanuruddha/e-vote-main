@@ -1,8 +1,9 @@
+// app/routes/admin.votes.$id.parties.tsx
 import type { LoaderFunctionArgs, ActionFunctionArgs } from "@remix-run/node";
 import { json, redirect } from "@remix-run/node";
 import { Form, useActionData, useLoaderData, useNavigation } from "@remix-run/react";
 import { useId, useMemo, useState } from "react";
-import { api } from "../utils/api.server";
+import { api, BACKEND_BASE } from "../utils/api.server";
 import { requireAdmin } from "../utils/session.server";
 
 /* ---------------- Types ---------------- */
@@ -19,9 +20,27 @@ type ActionData = {
 /* ---------------- Loader ---------------- */
 export async function loader({ request, params }: LoaderFunctionArgs) {
   await requireAdmin(request);
-  const vote = await api(request, `/api/vote/${params.id}`) as { vote: VoteDetail };
-  const parties = await api(request, `/api/parties/${params.id}`) as { parties: Party[] };
-  return json({ vote: vote.vote, parties: parties.parties });
+  const id = Number(params.id);
+  if (!id) throw new Response("Bad Request", { status: 400 });
+
+  // Get vote detail (plural route)
+  const voteResp = await api(request, `/api/votes/${id}`) as { vote: VoteDetail };
+
+  // Best-effort parties fetch; don't crash if endpoint is missing
+  let parties: Party[] = [];
+  try {
+    const res = await fetch(`${BACKEND_BASE}/api/parties/${id}`, {
+      headers: { accept: "application/json" },
+    });
+    if (res.ok) {
+      const j = (await res.json()) as { parties?: Party[] };
+      parties = j.parties || [];
+    }
+  } catch {
+    // ignore if not implemented or unreachable
+  }
+
+  return json({ vote: voteResp.vote, parties });
 }
 
 /* ---------------- Validation ---------------- */
@@ -35,7 +54,7 @@ function validateCreateOrUpdate(payload: { name?: string; code?: string; symbol_
 
 /* ---------------- Action ---------------- */
 export async function action({ request, params }: ActionFunctionArgs) {
-  await requireAdmin(request);
+  const admin = await requireAdmin(request);
   const form = await request.formData();
   const intent = String(form.get("intent") || "") as ActionIntent;
 
@@ -49,10 +68,14 @@ export async function action({ request, params }: ActionFunctionArgs) {
         is_active: !!form.get("is_active"),
       };
       const fieldErrors = validateCreateOrUpdate(payload);
-      if (fieldErrors && Object.keys(fieldErrors).length) {
+      if (Object.keys(fieldErrors).length) {
         return json<ActionData>({ ok: false, message: "Please fix the errors below.", fieldErrors }, { status: 400 });
       }
-      await api(request, "/api/party/create", { method: "POST", body: JSON.stringify(payload) });
+      await api(request, "/api/party/create", {
+        method: "POST",
+        headers: { "x-admin-id": String(admin.id) },
+        body: JSON.stringify(payload),
+      });
       return redirect(`/admin/votes/${params.id}/parties`);
     }
 
@@ -62,31 +85,43 @@ export async function action({ request, params }: ActionFunctionArgs) {
         name: String(form.get("name") || ""),
         code: String(form.get("code") || ""),
         symbol_url: String(form.get("symbol_url") || ""),
+        // checkbox: present => "1"; absent => null => false
         is_active: String(form.get("is_active")) === "1",
       };
       const fieldErrors = validateCreateOrUpdate(payload);
-      if (fieldErrors && Object.keys(fieldErrors).length) {
+      if (Object.keys(fieldErrors).length) {
         return json<ActionData>({ ok: false, message: "Please fix the errors below.", fieldErrors }, { status: 400 });
       }
-      await api(request, `/api/party/${party_id}`, { method: "PUT", body: JSON.stringify(payload) });
+      await api(request, `/api/party/${party_id}`, {
+        method: "PUT",
+        headers: { "x-admin-id": String(admin.id) },
+        body: JSON.stringify(payload),
+      });
       return redirect(`/admin/votes/${params.id}/parties`);
     }
 
     if (intent === "toggle") {
       const party_id = Number(form.get("party_id"));
       const is_active = String(form.get("is_active")) === "1";
-      await api(request, `/api/party/${party_id}`, { method: "PUT", body: JSON.stringify({ is_active: !is_active }) });
+      await api(request, `/api/party/${party_id}`, {
+        method: "PUT",
+        headers: { "x-admin-id": String(admin.id) },
+        body: JSON.stringify({ is_active: !is_active }),
+      });
       return redirect(`/admin/votes/${params.id}/parties`);
     }
 
     if (intent === "delete") {
       const party_id = Number(form.get("party_id"));
-      await api(request, `/api/party/${party_id}`, { method: "DELETE" });
+      await api(request, `/api/party/${party_id}`, {
+        method: "DELETE",
+        headers: { "x-admin-id": String(admin.id) },
+      });
       return redirect(`/admin/votes/${params.id}/parties`);
     }
 
     return json<ActionData>({ ok: false, message: "Unknown action." }, { status: 400 });
-  } catch (e) {
+  } catch {
     return json<ActionData>({ ok: false, message: "Request failed. Please try again." }, { status: 500 });
   }
 }
@@ -192,6 +227,13 @@ function PartiesTable({ parties, isSubmitting }: { parties: Party[]; isSubmittin
               isSubmitting={isSubmitting}
             />
           ))}
+          {parties.length === 0 && (
+            <tr>
+              <td className="px-3 py-6 text-center text-gray-500" colSpan={5}>
+                No parties (or Parties API not implemented).
+              </td>
+            </tr>
+          )}
         </tbody>
       </table>
 
@@ -234,11 +276,7 @@ function Row({
       <td className="px-3 py-2">
         {!isEditing ? (
           <div className="flex flex-wrap items-center gap-2">
-            <button
-              className="rounded-md border px-3 py-1"
-              onClick={onEdit}
-              disabled={isSubmitting}
-            >
+            <button className="rounded-md border px-3 py-1" onClick={onEdit} disabled={isSubmitting}>
               Edit
             </button>
             <Form method="post" className="inline">
@@ -320,7 +358,13 @@ function InlineEdit({ party, onDone, isSubmitting }: { party: Party; onDone: () 
       </label>
 
       <label className="text-sm flex items-center gap-2">
-        <input type="checkbox" name="is_active" value={active ? "1" : "0"} checked={active} onChange={(e) => setActive(e.target.checked)} />
+        <input
+          type="checkbox"
+          name="is_active"
+          value={active ? "1" : "0"}
+          checked={active}
+          onChange={(e) => setActive(e.target.checked)}
+        />
         Active
       </label>
 
@@ -332,7 +376,6 @@ function InlineEdit({ party, onDone, isSubmitting }: { party: Party; onDone: () 
           Close
         </button>
         {error && <span className="text-xs text-red-600">{error}</span>}
-        {/* Preview */}
         {symbolUrl && /^https?:\/\//i.test(symbolUrl) && (
           <span className="ml-auto inline-flex items-center gap-2 text-xs text-gray-600">
             Preview:
