@@ -1,4 +1,4 @@
-export const BACKEND_BASE = process.env.BACKEND_BASE || "http://localhost:8000"; // coordinator URL
+export const BACKEND_BASE = process.env.BACKEND_BASE || "http://localhost:8000";
 
 export async function api(request: Request, path: string, init?: RequestInit) {
   const url = `${BACKEND_BASE}${path}`;

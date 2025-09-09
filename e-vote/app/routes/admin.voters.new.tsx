@@ -1,3 +1,4 @@
+// app/routes/admin.voters.new.tsx
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "@remix-run/node";
 import { json, redirect } from "@remix-run/node";
 import { Form, useActionData, useNavigation } from "@remix-run/react";
@@ -48,13 +49,11 @@ function validate(fields: Record<string, string>): FieldErrors {
   req("dob", "Date of birth");
   req("fingerprint", "Fingerprint");
 
-  // Location must be explicitly selected (no default)
   if (!fields.location_id) errors.location_id = "Please select a location preset";
   (["administration", "electoral", "polling", "gn"] as const).forEach((k) => {
     if (!fields[k]) errors[k] = "Location preset is incomplete";
   });
 
-  // Shapes
   if (fields.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(fields.email)) errors.email = "Invalid email format";
   if (fields.mobile && !/^[0-9+()\-\s]{7,20}$/.test(fields.mobile)) errors.mobile = "Invalid mobile format";
   if (fields.dob && isNaN(Date.parse(fields.dob))) errors.dob = "Invalid date";
@@ -75,7 +74,6 @@ export async function action({ request }: ActionFunctionArgs) {
   }
 
   try {
-    // If your backend doesn't require the header, remove x-admin-id
     await api(request, "/api/admin/voters", {
       method: "POST",
       headers: { "x-admin-id": "1" },
@@ -90,7 +88,7 @@ export async function action({ request }: ActionFunctionArgs) {
   }
 }
 
-/* ---------- Location Presets (explicit selection required) ---------- */
+/* ---------- Location Presets ---------- */
 const locationSets = [
   {
     id: "kegalle",
@@ -116,7 +114,6 @@ export default function NewVoter() {
   const nav = useNavigation();
   const isSubmitting = nav.state === "submitting";
 
-  // Force explicit preset selection (no default picked)
   const [selectedLocationId, setSelectedLocationId] = useState<string>(
     (actionData?.fields?.location_id as (typeof locationSets)[number]["id"]) || ""
   );
@@ -129,14 +126,14 @@ export default function NewVoter() {
   const [fingerStatus, setFingerStatus] = useState<FingerStatus>("idle");
   const [fingerprint, setFingerprint] = useState<string>(actionData?.fields?.fingerprint || "");
   const [scanMessage, setScanMessage] = useState<string>("");
-  const [elapsed, setElapsed] = useState<number>(0);
 
-  // Polling timers
+  const [elapsed, setElapsed] = useState<number>(0);
   const pollTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const elapsedTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const scanStartRef = useRef<number | null>(null);
-  const SCAN_POLL_MS = 1200;
-  const SCAN_TIMEOUT_MS = 30_000; // 30s
+
+  const SCAN_POLL_MS = 1000;          // poll every 1s
+  const SCAN_TIMEOUT_MS = 30_000;     // 30s timeout
 
   useEffect(() => {
     if (fingerStatus !== "scanning") {
@@ -150,7 +147,6 @@ export default function NewVoter() {
 
     const poll = async () => {
       try {
-        // timeout
         if (scanStartRef.current && Date.now() - scanStartRef.current > SCAN_TIMEOUT_MS) {
           setFingerStatus("fail");
           setScanMessage("Timed out. Please try again.");
@@ -175,13 +171,12 @@ export default function NewVoter() {
       }
     };
 
-    // Start timers
     pollTimerRef.current = setInterval(poll, SCAN_POLL_MS);
     elapsedTimerRef.current = setInterval(() => {
       if (scanStartRef.current) setElapsed(Date.now() - scanStartRef.current);
-    }, 200);
+    }, 150);
 
-    // Kick immediately
+    // immediate first poll
     void poll();
 
     return stopTimers;
@@ -195,7 +190,13 @@ export default function NewVoter() {
     elapsedTimerRef.current = null;
   }
 
-  const startScan = () => {
+  const startScan = async () => {
+    try {
+      // Clear any stale template BEFORE starting a new session
+      await fetch(`${BACKEND_BASE}/api/fingerprint/scan`, { method: "DELETE" });
+    } catch {
+      // non-fatal
+    }
     setFingerprint("");
     setFingerStatus("scanning");
     setScanMessage("Initializing scan…");
@@ -207,9 +208,10 @@ export default function NewVoter() {
     stopTimers();
   };
 
-  // UI helpers
   const err = actionData?.errors || {};
   const banner = actionData?.message;
+
+  // Use these so ESLint doesn't complain
   const disableSave =
     isSubmitting || fingerStatus === "scanning" || !selectedLocationId || !fingerprint.trim();
   const progressPct = Math.min(100, Math.round((elapsed / SCAN_TIMEOUT_MS) * 100));
@@ -252,7 +254,6 @@ export default function NewVoter() {
               </select>
             </div>
 
-            {/* Cards for quick visual selection */}
             <div className="grid gap-3">
               {locationSets.map((loc) => {
                 const active = selectedLocationId === loc.id;
@@ -338,6 +339,10 @@ export default function NewVoter() {
                   <div
                     className="h-2 rounded-full bg-gray-500 transition-all"
                     style={{ width: `${progressPct}%` }}
+                    role="progressbar"
+                    aria-valuemin={0}
+                    aria-valuemax={100}
+                    aria-valuenow={progressPct}
                   />
                 )}
               </div>
@@ -365,10 +370,10 @@ export default function NewVoter() {
 
         {/* RIGHT: Main Form */}
         <Form method="post" className="grid grid-cols-2 gap-3">
-          <Field label="Full Name" name="full_name" error={err.full_name} required defaultValue={actionData?.fields?.full_name} />
-          <Field label="NIC" name="nic" error={err.nic} required defaultValue={actionData?.fields?.nic} />
+          <Field label="Full Name" name="full_name" required defaultValue={actionData?.fields?.full_name} />
+          <Field label="NIC" name="nic" required defaultValue={actionData?.fields?.nic} />
 
-          <Field label="DOB" name="dob" type="date" error={err.dob} required defaultValue={actionData?.fields?.dob} />
+          <Field label="DOB" name="dob" type="date" required defaultValue={actionData?.fields?.dob} />
           <label className="text-sm">
             <span className="text-gray-800 font-medium">Gender</span>
             <select name="gender" defaultValue={actionData?.fields?.gender || ""} className="mt-1 w-full rounded-md border-gray-300">
@@ -376,21 +381,20 @@ export default function NewVoter() {
               <option value="M">M</option>
               <option value="F">F</option>
             </select>
-            {err.gender && <span className="mt-1 block text-xs text-red-600">{err.gender}</span>}
           </label>
 
-          <Field label="Household" name="household" defaultValue={actionData?.fields?.household} className="col-span-2" />
-          <Field label="Mobile" name="mobile" error={err.mobile} defaultValue={actionData?.fields?.mobile} />
-          <Field label="Email" name="email" type="email" error={err.email} defaultValue={actionData?.fields?.email} />
+          <Field label="Household" name="household" className="col-span-2" defaultValue={actionData?.fields?.household} />
+          <Field label="Mobile" name="mobile" defaultValue={actionData?.fields?.mobile} />
+          <Field label="Email" name="email" type="email" defaultValue={actionData?.fields?.email} />
 
           {/* Preset mirrors (submitted to backend) */}
           <input type="hidden" name="location_id" value={selectedLocation?.id || ""} />
-          <Field label="Administration" name="administration" readOnly defaultValue={selectedLocation?.administration || ""} error={err.administration} />
-          <Field label="Electoral" name="electoral" readOnly defaultValue={selectedLocation?.electoral || ""} error={err.electoral} />
-          <Field label="Polling" name="polling" readOnly defaultValue={selectedLocation?.polling || ""} error={err.polling} />
-          <Field label="GN" name="gn" readOnly defaultValue={selectedLocation?.gn || ""} error={err.gn} />
+          <Field label="Administration" name="administration" readOnly defaultValue={selectedLocation?.administration || ""} />
+          <Field label="Electoral" name="electoral" readOnly defaultValue={selectedLocation?.electoral || ""} />
+          <Field label="Polling" name="polling" readOnly defaultValue={selectedLocation?.polling || ""} />
+          <Field label="GN" name="gn" readOnly defaultValue={selectedLocation?.gn || ""} />
 
-          {/* Hidden mirror for fingerprint to guarantee submit even if left input is cleared */}
+          {/* Hidden mirror for fingerprint to guarantee submit */}
           <input type="hidden" name="fingerprint" value={fingerprint} />
 
           <div className="col-span-2 mt-2 flex items-center gap-3">
