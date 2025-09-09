@@ -675,3 +675,73 @@ def vote_analytics():
         return {"analytics": analytics}
     finally:
         cur.close(); conn.close()
+
+
+# ---------------- Vote results (per party) ----------------
+@app.get("/api/votes/{vote_id}/results")
+def get_vote_results(vote_id: int = Path(..., gt=0)):
+    conn, cur = db()
+    try:
+        # 1) Make sure the vote exists
+        cur.execute(
+            """
+            SELECT id, title, description, status, start_at, end_at
+            FROM votes
+            WHERE id = %s
+            """,
+            (vote_id,),
+        )
+        vr = cur.fetchone()
+        if not vr:
+            raise HTTPException(status_code=404, detail="Vote not found")
+
+        vote = {
+            "id": vr[0],
+            "title": vr[1],
+            "description": vr[2],
+            "status": vr[3],
+            "start_at": vr[4].strftime("%Y-%m-%d %H:%M:%S") if vr[4] else None,
+            "end_at": vr[5].strftime("%Y-%m-%d %H:%M:%S") if vr[5] else None,
+        }
+
+        # 2) Count votes per party (include all parties for this vote; add AND p.is_active=1 if you want only active)
+        cur.execute(
+            """
+            SELECT
+              p.id            AS party_id,
+              p.name          AS name,
+              p.code          AS code,
+              p.symbol_url    AS symbol_url,
+              COALESCE(COUNT(r.id), 0) AS votes
+            FROM parties p
+            LEFT JOIN vote_records r
+              ON r.party_id = p.id
+             AND r.vote_id  = %s
+            WHERE p.vote_id = %s
+            GROUP BY p.id, p.name, p.code, p.symbol_url
+            ORDER BY votes DESC, p.name ASC
+            """,
+            (vote_id, vote_id),
+        )
+        rows = cur.fetchall()
+
+        results = [
+            {
+                "party_id": r[0],
+                "name": r[1],
+                "code": r[2],
+                "symbol_url": r[3],
+                "votes": int(r[4]),
+            }
+            for r in rows
+        ]
+        total_votes = sum(item["votes"] for item in results)
+
+        return {
+            "vote": vote,
+            "results": results,
+            "total_votes": total_votes,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+    finally:
+        cur.close(); conn.close()

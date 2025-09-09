@@ -2,35 +2,14 @@
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "@remix-run/node";
 import { json, redirect } from "@remix-run/node";
 import { Form, useActionData, useNavigation } from "@remix-run/react";
-import { useEffect, useMemo, useRef, useState } from "react";
 import { requireAdmin } from "../utils/session.server";
 import { api } from "../utils/api.server";
 
 /* ---------- Types ---------- */
-type FieldErrors = Partial<
-  Record<
-    | "full_name"
-    | "nic"
-    | "dob"
-    | "gender"
-    | "household"
-    | "mobile"
-    | "email"
-    | "location_id"
-    | "administration"
-    | "electoral"
-    | "polling"
-    | "gn"
-    | "fingerprint",
-    string
-  >
->;
-
 type ActionData = {
   ok?: boolean;
   message?: string;
   fields?: Record<string, string>;
-  errors?: FieldErrors;
 };
 
 /* ---------- Loader ---------- */
@@ -39,41 +18,12 @@ export async function loader({ request }: LoaderFunctionArgs) {
   return json({});
 }
 
-/* ---------- Validation ---------- */
-function validate(fields: Record<string, string>): FieldErrors {
-  const errors: FieldErrors = {};
-  const req = (k: keyof FieldErrors, label: string) => {
-    if (!fields[k] || !String(fields[k]).trim()) errors[k] = `${label} is required`;
-  };
-
-  req("full_name", "Full name");
-  req("nic", "NIC");
-  req("dob", "Date of birth");
-  req("fingerprint", "Fingerprint");
-
-  if (!fields.location_id) errors.location_id = "Please select a location preset";
-  (["administration", "electoral", "polling", "gn"] as const).forEach((k) => {
-    if (!fields[k]) errors[k] = "Location preset is incomplete";
-  });
-
-  if (fields.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(fields.email)) errors.email = "Invalid email format";
-  if (fields.mobile && !/^[0-9+()\-\s]{7,20}$/.test(fields.mobile)) errors.mobile = "Invalid mobile format";
-  if (fields.dob && isNaN(Date.parse(fields.dob))) errors.dob = "Invalid date";
-
-  return errors;
-}
-
-/* ---------- Action ---------- */
+/* ---------- Action (no validation for testing) ---------- */
 export async function action({ request }: ActionFunctionArgs) {
   await requireAdmin(request);
 
   const form = await request.formData();
   const fields = Object.fromEntries(form) as Record<string, string>;
-  const errors = validate(fields);
-
-  if (Object.keys(errors).length > 0) {
-    return json<ActionData>({ ok: false, message: "Please fix the errors below.", fields, errors }, { status: 400 });
-  }
 
   try {
     await api(request, "/api/admin/voters", {
@@ -82,7 +32,7 @@ export async function action({ request }: ActionFunctionArgs) {
       body: JSON.stringify(fields),
     });
     return redirect("/admin/voters");
-  } catch {
+  } catch (e) {
     return json<ActionData>(
       { ok: false, message: "Failed to create voter. Please try again.", fields },
       { status: 500 }
@@ -90,159 +40,197 @@ export async function action({ request }: ActionFunctionArgs) {
   }
 }
 
-/* ---------- Location Presets ---------- */
-const locationSets = [
-  {
-    id: "kegalle",
-    administration: "25 - Kegalle",
-    electoral: "22 - Kegalle",
-    polling: "B - Galigamuwa",
-    gn: "74 D - Panakawa - 54",
-  },
-  {
-    id: "colombo",
-    administration: "11 - Colombo",
-    electoral: "01 - Colombo",
-    polling: "A - Colombo Central",
-    gn: "03 A - Fort - 12",
-  },
-] as const;
-
-type FingerStatus = "idle" | "scanning" | "success" | "fail";
-
-/* ---------- Client helpers (no any) ---------- */
-// Let TS know we might attach a runtime override on window, without using `any`.
-declare global {
-  interface Window {
-    __VITE_BACKEND_BASE__?: string;
-  }
-}
-
-function urlJoin(base: string, path: string): string {
-  const b = base.replace(/\/+$/, "");
-  const p = path.startsWith("/") ? path : `/${path}`;
-  return `${b}${p}`;
-}
-
-function getScanEndpoint(): string {
-  // Prefer Vite env if present
-  const env = (import.meta as unknown as { env?: { VITE_BACKEND_BASE?: string } }).env;
-  const viteBase = env?.VITE_BACKEND_BASE;
-
-  // Optionally allow a runtime global override placed on window (e.g. in entry html)
-  const winBase = typeof window !== "undefined" ? window.__VITE_BACKEND_BASE__ : undefined;
-
-  const base = viteBase ?? winBase;
-  return base ? urlJoin(base, "/api/fingerprint/scan") : "/api/fingerprint/scan";
-}
-
 /* ---------- Page ---------- */
 export default function NewVoter() {
   const actionData = useActionData<ActionData>();
   const nav = useNavigation();
   const isSubmitting = nav.state === "submitting";
-
-  const [selectedLocationId, setSelectedLocationId] = useState<string>(
-    (actionData?.fields?.location_id as (typeof locationSets)[number]["id"]) || ""
-  );
-  const selectedLocation = useMemo(
-    () => locationSets.find((l) => l.id === selectedLocationId),
-    [selectedLocationId]
-  );
-
-  // Fingerprint scanning state
-  const [fingerStatus, setFingerStatus] = useState<FingerStatus>("idle");
-  const [fingerprint, setFingerprint] = useState<string>(actionData?.fields?.fingerprint || "");
-  const [scanMessage, setScanMessage] = useState<string>("");
-
-  const [elapsed, setElapsed] = useState<number>(0);
-  const pollTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const elapsedTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const scanStartRef = useRef<number | null>(null);
-
-  const SCAN_ENDPOINT = getScanEndpoint();
-  const SCAN_POLL_MS = 1000; // 1s
-  const SCAN_TIMEOUT_MS = 30_000; // 30s
-
-  useEffect(() => {
-    if (fingerStatus !== "scanning") {
-      stopTimers();
-      return;
-    }
-
-    scanStartRef.current = Date.now();
-    setElapsed(0);
-    setScanMessage("Place finger on the reader…");
-
-    const poll = async () => {
-      try {
-        if (scanStartRef.current && Date.now() - scanStartRef.current > SCAN_TIMEOUT_MS) {
-          setFingerStatus("fail");
-          setScanMessage("Timed out. Please try again.");
-          stopTimers();
-          return;
-        }
-
-        const res = await fetch(SCAN_ENDPOINT, { method: "GET" });
-        if (!res.ok) throw new Error(await res.text());
-        const data: { fingerprint?: string | null } = await res.json();
-
-        if (data.fingerprint) {
-          setFingerprint(String(data.fingerprint));
-          setFingerStatus("success");
-          setScanMessage("Fingerprint captured ✅");
-          stopTimers();
-        }
-      } catch {
-        setFingerStatus("fail");
-        setScanMessage("Failed to reach scanner API.");
-        stopTimers();
-      }
-    };
-
-    pollTimerRef.current = setInterval(poll, SCAN_POLL_MS);
-    elapsedTimerRef.current = setInterval(() => {
-      if (scanStartRef.current) setElapsed(Date.now() - scanStartRef.current);
-    }, 150);
-
-    // immediate first poll
-    void poll();
-
-    return stopTimers;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [fingerStatus, SCAN_ENDPOINT]);
-
-  function stopTimers() {
-    if (pollTimerRef.current) clearInterval(pollTimerRef.current);
-    if (elapsedTimerRef.current) clearInterval(elapsedTimerRef.current);
-    pollTimerRef.current = null;
-    elapsedTimerRef.current = null;
-  }
-
-  const startScan = async () => {
-    try {
-      // Clear stale template BEFORE starting a new session
-      await fetch(SCAN_ENDPOINT, { method: "DELETE" });
-    } catch {
-      // ignore; not fatal
-    }
-    setFingerprint("");
-    setFingerStatus("scanning");
-    setScanMessage("Initializing scan…");
-  };
-
-  const stopScan = () => {
-    setFingerStatus("idle");
-    setScanMessage("Scan stopped.");
-    stopTimers();
-  };
-
-  const err = actionData?.errors || {};
   const banner = actionData?.message;
 
-  const disableSave =
-    isSubmitting || fingerStatus === "scanning" || !selectedLocationId || !fingerprint.trim();
-  const progressPct = Math.min(100, Math.round((elapsed / SCAN_TIMEOUT_MS) * 100));
+  // Selection + Scan + Manual paste (vanilla JS). The fingerprint input is tied to the form via `form="voter-form"`.
+  const inlineScript = `
+(function () {
+  /* ---------- PRESETS ---------- */
+  var cards = Array.prototype.slice.call(document.querySelectorAll('[data-preset-card="1"]'));
+  var selectEl = document.getElementById('preset-select');
+  var locIdEl = document.getElementById('location-id-input');
+
+  var adminEl = document.getElementById('administration-input');
+  var electoralEl = document.getElementById('electoral-input');
+  var pollingEl = document.getElementById('polling-input');
+  var gnEl = document.getElementById('gn-input');
+
+  var summaryId = document.getElementById('summary-id');
+  var summaryAdmin = document.getElementById('summary-admin');
+  var summaryElectoral = document.getElementById('summary-electoral');
+  var summaryPolling = document.getElementById('summary-polling');
+  var summaryGn = document.getElementById('summary-gn');
+
+  function applyPresetByData(dataset) {
+    if (!dataset) return;
+    var id = dataset.id || '';
+    var administration = dataset.administration || '';
+    var electoral = dataset.electoral || '';
+    var polling = dataset.polling || '';
+    var gn = dataset.gn || '';
+
+    if (locIdEl) locIdEl.value = id;
+    if (adminEl) adminEl.value = administration;
+    if (electoralEl) electoralEl.value = electoral;
+    if (pollingEl) pollingEl.value = polling;
+    if (gnEl) gnEl.value = gn;
+
+    if (summaryId) summaryId.textContent = id || '-';
+    if (summaryAdmin) summaryAdmin.textContent = administration || '-';
+    if (summaryElectoral) summaryElectoral.textContent = electoral || '-';
+    if (summaryPolling) summaryPolling.textContent = polling || '-';
+    if (summaryGn) summaryGn.textContent = gn || '-';
+
+    if (selectEl && selectEl.value !== id) selectEl.value = id;
+
+    cards.forEach(function (card) {
+      if (card.dataset.id === id) {
+        card.classList.add('selected-card');
+      } else {
+        card.classList.remove('selected-card');
+      }
+    });
+  }
+
+  function applyPresetById(id) {
+    var card = cards.find(function(c){ return c.dataset.id === id; });
+    if (card) applyPresetByData(card.dataset);
+  }
+
+  cards.forEach(function(card) {
+    card.addEventListener('click', function () { applyPresetByData(card.dataset); });
+  });
+
+  if (selectEl) {
+    selectEl.addEventListener('change', function () { applyPresetById(selectEl.value); });
+  }
+
+  var initialId = (locIdEl && locIdEl.value) || (selectEl && selectEl.value) || '';
+  if (initialId) applyPresetById(initialId);
+
+  /* ---------- SCAN BUTTON + MANUAL INPUT ---------- */
+  var btn = document.getElementById("scan-btn");
+  var statusEl = document.getElementById("scan-status");
+  var msgEl = document.getElementById("scan-msg");
+  var fpEl = document.getElementById("fingerprint-input"); // NOTE: has name="fingerprint" + form="voter-form"
+  var clearEl = document.getElementById("fingerprint-clear");
+  var bar = document.getElementById("scan-bar");
+  var innerBar = document.getElementById("scan-bar-inner");
+
+  function setStatus(t){ if(statusEl) statusEl.textContent = t; }
+  function setMsg(t){ if(msgEl) msgEl.textContent = t; }
+  function setBar(active){ if(bar && innerBar){ bar.style.visibility = active ? "visible" : "hidden"; innerBar.style.width = "0%"; } }
+
+  // Manual input (e.g., typing '1') is accepted as Captured
+  if (fpEl) {
+    var markManual = function() {
+      var v = fpEl.value.trim();
+      if (v) {
+        if (btn) { btn.dataset.mode = "idle"; btn.textContent = "Start Scan"; btn.classList.remove("stop"); }
+        setBar(false);
+        setStatus("Captured ✅");
+        setMsg("Manual fingerprint set.");
+      } else {
+        setStatus("Idle");
+        setMsg("");
+      }
+    };
+    fpEl.addEventListener("input", markManual);
+    fpEl.addEventListener("paste", function(){ setTimeout(markManual, 0); });
+  }
+
+  if (clearEl && fpEl) {
+    clearEl.addEventListener("click", function(){
+      fpEl.value = "";
+      setStatus("Idle");
+      setMsg("Cleared.");
+    });
+  }
+
+  if (btn && statusEl && msgEl && fpEl && bar && innerBar) {
+    var endpoint = "/api/fingerprint/scan";
+    var POLL_MS = 1000;
+    var TIMEOUT_MS = 30000;
+    var timer = null;
+    var startAt = 0;
+    var session = 0;
+
+    function stop() {
+      session++;
+      if (timer) clearInterval(timer);
+      timer = null;
+      btn.dataset.mode = "idle";
+      btn.textContent = "Start Scan";
+      btn.classList.remove("stop");
+      setBar(false);
+    }
+
+    async function pollOnce(mySession) {
+      if (Date.now() - startAt > TIMEOUT_MS) {
+        setStatus("Failed ❌");
+        setMsg("Timed out. Please try again.");
+        stop();
+        return;
+      }
+      var elapsed = Date.now() - startAt;
+      if (innerBar) innerBar.style.width = Math.min(100, Math.round((elapsed / TIMEOUT_MS) * 100)) + "%";
+
+      try {
+        var res = await fetch(endpoint + "?t=" + Date.now(), { method: "GET", headers: { "Accept":"application/json" }, cache: "no-store" });
+        if (session !== mySession) return;
+        if (!res.ok) {
+          setStatus("Failed ❌");
+          setMsg("GET failed (" + res.status + ")");
+          stop();
+          return;
+        }
+        var j = await res.json();
+        if (j && j.fingerprint) {
+          fpEl.value = String(j.fingerprint);
+          setStatus("Captured ✅");
+          setMsg("Fingerprint captured.");
+          stop();
+        }
+      } catch (e) {
+        if (session !== mySession) return;
+        setStatus("Failed ❌");
+        setMsg("Network error.");
+        stop();
+      }
+    }
+
+    btn.addEventListener("click", async function () {
+      if (btn.dataset.mode === "scanning") {
+        setStatus("Idle");
+        setMsg("Scan stopped.");
+        stop();
+        return;
+      }
+
+      session++;
+      var mySession = session;
+      try { await fetch(endpoint, { method:"DELETE", headers: { "Accept":"application/json" } }); } catch (_) {}
+
+      fpEl.value = "";
+      btn.dataset.mode = "scanning";
+      btn.textContent = "Stop";
+      btn.classList.add("stop");
+      setBar(true);
+      setStatus("Scanning…");
+      setMsg("Place finger on the reader…");
+      startAt = Date.now();
+
+      await pollOnce(mySession);
+      timer = setInterval(function () { pollOnce(mySession); }, POLL_MS);
+    });
+  }
+})();
+  `.trim();
 
   return (
     <div className="max-w-6xl">
@@ -268,140 +256,140 @@ export default function NewVoter() {
             <div className="mb-3 flex items-center justify-between">
               <div className="text-sm font-semibold text-gray-900">Location Presets</div>
               <select
+                id="preset-select"
                 aria-label="Select location preset"
-                value={selectedLocationId}
-                onChange={(e) => setSelectedLocationId(e.target.value)}
+                defaultValue={actionData?.fields?.location_id || ""}
                 className="rounded-md border-gray-300 text-sm"
               >
                 <option value="">Choose…</option>
-                {locationSets.map((loc) => (
-                  <option key={loc.id} value={loc.id}>
-                    {loc.administration} · {loc.electoral}
-                  </option>
-                ))}
+                <option value="kegalle">25 - Kegalle · 22 - Kegalle</option>
+                <option value="colombo">11 - Colombo · 01 - Colombo</option>
               </select>
             </div>
 
+            {/* Clickable cards with data-* so script can read values */}
             <div className="grid gap-3">
-              {locationSets.map((loc) => {
-                const active = selectedLocationId === loc.id;
-                return (
-                  <button
-                    key={loc.id}
-                    type="button"
-                    onClick={() => setSelectedLocationId(loc.id)}
-                    className={`w-full text-left rounded-xl border p-4 transition ${
-                      active ? "border-black bg-gray-50" : "border-gray-200 bg-white hover:bg-gray-50"
-                    }`}
-                    aria-pressed={active}
-                  >
-                    <div className="text-xs font-semibold text-gray-900">Administration</div>
-                    <div className="text-lg font-semibold text-gray-900">{loc.administration}</div>
-                    <div className="mt-2 text-xs font-semibold text-gray-900">Electoral</div>
-                    <div className="text-lg font-semibold text-gray-900">{loc.electoral}</div>
-                    <div className="mt-2 text-xs font-semibold text-gray-900">Polling</div>
-                    <div className="text-lg font-semibold text-gray-900">{loc.polling}</div>
-                    <div className="mt-2 text-xs font-semibold text-gray-900">GN</div>
-                    <div className="text-lg font-semibold text-gray-900">{loc.gn}</div>
-                  </button>
-                );
-              })}
+              <button
+                type="button"
+                data-preset-card="1"
+                data-id="kegalle"
+                data-administration="25 - Kegalle"
+                data-electoral="22 - Kegalle"
+                data-polling="B - Galigamuwa"
+                data-gn="74 D - Panakawa - 54"
+                className="w-full text-left rounded-xl border border-gray-200 bg-white p-4 transition hover:bg-gray-50"
+              >
+                <div className="text-xs font-semibold text-gray-900">Administration</div>
+                <div className="text-lg font-semibold text-gray-900">25 - Kegalle</div>
+                <div className="mt-2 text-xs font-semibold text-gray-900">Electoral</div>
+                <div className="text-lg font-semibold text-gray-900">22 - Kegalle</div>
+                <div className="mt-2 text-xs font-semibold text-gray-900">Polling</div>
+                <div className="text-lg font-semibold text-gray-900">B - Galigamuwa</div>
+                <div className="mt-2 text-xs font-semibold text-gray-900">GN</div>
+                <div className="text-lg font-semibold text-gray-900">74 D - Panakawa - 54</div>
+              </button>
+
+              <button
+                type="button"
+                data-preset-card="1"
+                data-id="colombo"
+                data-administration="11 - Colombo"
+                data-electoral="01 - Colombo"
+                data-polling="A - Colombo Central"
+                data-gn="03 A - Fort - 12"
+                className="w-full text-left rounded-xl border border-gray-200 bg-white p-4 transition hover:bg-gray-50"
+              >
+                <div className="text-xs font-semibold text-gray-900">Administration</div>
+                <div className="text-lg font-semibold text-gray-900">11 - Colombo</div>
+                <div className="mt-2 text-xs font-semibold text-gray-900">Electoral</div>
+                <div className="text-lg font-semibold text-gray-900">01 - Colombo</div>
+                <div className="mt-2 text-xs font-semibold text-gray-900">Polling</div>
+                <div className="text-lg font-semibold text-gray-900">A - Colombo Central</div>
+                <div className="mt-2 text-xs font-semibold text-gray-900">GN</div>
+                <div className="text-lg font-semibold text-gray-900">03 A - Fort - 12</div>
+              </button>
             </div>
-            {err.location_id && <p className="mt-2 text-xs text-red-600">{err.location_id}</p>}
+
+            {/* Live summary, updated by script */}
+            <div className="mt-3 rounded-lg border bg-gray-50 p-3 text-xs text-gray-700">
+              <div>
+                Selected preset: <b id="summary-id">{actionData?.fields?.location_id || "-"}</b>
+              </div>
+              <div className="mt-1">
+                Admin: <code id="summary-admin">{actionData?.fields?.administration || "-"}</code>
+              </div>
+              <div>
+                Electoral: <code id="summary-electoral">{actionData?.fields?.electoral || "-"}</code>
+              </div>
+              <div>
+                Polling: <code id="summary-polling">{actionData?.fields?.polling || "-"}</code>
+              </div>
+              <div>
+                GN: <code id="summary-gn">{actionData?.fields?.gn || "-"}</code>
+              </div>
+            </div>
           </section>
 
-          {/* Fingerprint */}
+          {/* Fingerprint (plain JS button + manual paste support) */}
           <section className="rounded-2xl border border-gray-200 bg-white p-4">
             <div className="flex items-center justify-between">
               <div className="text-sm font-medium text-gray-900">Fingerprint</div>
               <div className="flex items-center gap-2 text-xs text-gray-600">
-                <StatusDot status={fingerStatus} />
-                <span className="min-w-[90px]">
-                  {fingerStatus === "idle" && "Idle"}
-                  {fingerStatus === "scanning" && "Scanning…"}
-                  {fingerStatus === "success" && "Captured ✅"}
-                  {fingerStatus === "fail" && "Failed ❌"}
-                </span>
+                <span id="scan-status" className="min-w-[90px] inline-block">Idle</span>
               </div>
             </div>
 
             <div className="mt-3 flex items-center gap-3">
-              {fingerStatus !== "scanning" ? (
-                <button
-                  type="button"
-                  onClick={startScan}
-                  className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700"
-                >
-                  Start Scan
-                </button>
-              ) : (
-                <button
-                  type="button"
-                  onClick={stopScan}
-                  className="rounded-lg bg-gray-900 px-4 py-2 text-sm font-medium text-white hover:bg-black"
-                >
-                  Stop
-                </button>
-              )}
+              <button
+                id="scan-btn"
+                type="button"
+                data-mode="idle"
+                className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700"
+              >
+                Start Scan
+              </button>
 
+              {/* This input is SUBMITTED with the form via form="voter-form" */}
               <input
+                id="fingerprint-input"
                 name="fingerprint"
-                value={fingerprint}
-                onChange={(e) => setFingerprint(e.target.value)}
-                placeholder="or paste manual fingerprint value"
-                className={`block w-full rounded-lg border ${
-                  err.fingerprint ? "border-red-300" : "border-gray-300"
-                } text-sm`}
+                form="voter-form"
+                placeholder="or paste manual fingerprint value (e.g. 1)"
+                autoComplete="off"
+                className="block w-full rounded-lg border border-gray-300 text-sm"
+                defaultValue={actionData?.fields?.fingerprint || ""}
               />
+
+              <button
+                id="fingerprint-clear"
+                type="button"
+                className="rounded-md border px-2 py-1 text-xs hover:bg-gray-50"
+                title="Clear"
+              >
+                Clear
+              </button>
             </div>
 
-            {/* Progress + message */}
+            {/* Progress bar + message (managed by the script) */}
             <div className="mt-3">
-              <div
-                className={`h-2 w-full overflow-hidden rounded-full ${
-                  fingerStatus === "scanning" ? "bg-gray-100" : "bg-transparent"
-                }`}
-                aria-hidden
-              >
-                {fingerStatus === "scanning" && (
-                  <div
-                    className="h-2 rounded-full bg-gray-500 transition-all"
-                    style={{ width: `${progressPct}%` }}
-                    role="progressbar"
-                    aria-valuemin={0}
-                    aria-valuemax={100}
-                    aria-valuenow={progressPct}
-                  />
-                )}
+              <div id="scan-bar" className="h-2 w-full overflow-hidden rounded-full bg-gray-100" style={{ visibility: "hidden" }}>
+                <div id="scan-bar-inner" className="h-2 rounded-full bg-gray-500 transition-all" style={{ width: "0%" }} />
               </div>
-              <div className="mt-2 flex items-center gap-2 text-xs text-gray-600" role="status" aria-live="polite">
-                {fingerStatus === "scanning" && <Spinner />}
-                <span>{scanMessage}</span>
-                {fingerStatus === "fail" && (
-                  <button
-                    type="button"
-                    onClick={startScan}
-                    className="ml-2 rounded-md border px-2 py-1 text-xs hover:bg-gray-50"
-                  >
-                    Retry
-                  </button>
-                )}
-              </div>
+              <div id="scan-msg" className="mt-2 text-xs text-gray-600" />
             </div>
 
             <p className="mt-2 text-xs text-gray-500">
-              Polls <code className="rounded bg-gray-100 px-1 py-0.5">/api/fingerprint/scan</code> until a template is
-              received or timeout (30s).
+              Paste a value to set it immediately, or use <code className="rounded bg-gray-100 px-1 py-0.5">Start Scan</code> to pull from the scanner buffer.
             </p>
           </section>
         </div>
 
-        {/* RIGHT: Main Form */}
-        <Form method="post" className="grid grid-cols-2 gap-3">
-          <Field label="Full Name" name="full_name" required defaultValue={actionData?.fields?.full_name} />
-          <Field label="NIC" name="nic" required defaultValue={actionData?.fields?.nic} />
+        {/* RIGHT: Main Form (noValidate to force post for testing) */}
+        <Form id="voter-form" noValidate method="post" className="grid grid-cols-2 gap-3">
+          <Field label="Full Name" name="full_name" defaultValue={actionData?.fields?.full_name} />
+          <Field label="NIC" name="nic" defaultValue={actionData?.fields?.nic} />
 
-          <Field label="DOB" name="dob" type="date" required defaultValue={actionData?.fields?.dob} />
+          <Field label="DOB" name="dob" type="date" defaultValue={actionData?.fields?.dob} />
           <label className="text-sm">
             <span className="text-gray-800 font-medium">Gender</span>
             <select name="gender" defaultValue={actionData?.fields?.gender || ""} className="mt-1 w-full rounded-md border-gray-300">
@@ -415,86 +403,62 @@ export default function NewVoter() {
           <Field label="Mobile" name="mobile" defaultValue={actionData?.fields?.mobile} />
           <Field label="Email" name="email" type="email" defaultValue={actionData?.fields?.email} />
 
-          {/* Preset mirrors */}
-          <input type="hidden" name="location_id" value={selectedLocation?.id || ""} />
-          <Field label="Administration" name="administration" readOnly defaultValue={selectedLocation?.administration || ""} />
-          <Field label="Electoral" name="electoral" readOnly defaultValue={selectedLocation?.electoral || ""} />
-          <Field label="Polling" name="polling" readOnly defaultValue={selectedLocation?.polling || ""} />
-          <Field label="GN" name="gn" readOnly defaultValue={selectedLocation?.gn || ""} />
+          {/* Hidden location id for submit (script sets this) */}
+          <input id="location-id-input" type="hidden" name="location_id" defaultValue={actionData?.fields?.location_id || ""} />
 
-          {/* Hidden mirror for fingerprint to guarantee submit */}
-          <input type="hidden" name="fingerprint" value={fingerprint} />
+          {/* Readonly mirrors (script writes here so you SEE the selection) */}
+          <Field id="administration-input" label="Administration" name="administration" readOnly defaultValue={actionData?.fields?.administration || ""} />
+          <Field id="electoral-input" label="Electoral" name="electoral" readOnly defaultValue={actionData?.fields?.electoral || ""} />
+          <Field id="polling-input" label="Polling" name="polling" readOnly defaultValue={actionData?.fields?.polling || ""} />
+          <Field id="gn-input" label="GN" name="gn" readOnly defaultValue={actionData?.fields?.gn || ""} />
 
           <div className="col-span-2 mt-2 flex items-center gap-3">
-            <button
-              className="rounded-md bg-black px-4 py-2 text-sm text-white disabled:opacity-60"
-              disabled={disableSave}
-              title={
-                fingerStatus === "scanning"
-                  ? "Finish or stop scanning first"
-                  : !selectedLocationId
-                  ? "Select a location preset"
-                  : !fingerprint
-                  ? "Fingerprint is required"
-                  : undefined
-              }
-            >
+            <button className="rounded-md bg-black px-4 py-2 text-sm text-white disabled:opacity-60" disabled={isSubmitting}>
               {isSubmitting ? "Saving…" : "Save"}
             </button>
-            {!selectedLocationId && (
-              <span className="text-xs text-red-600">Select a location preset to enable saving.</span>
-            )}
           </div>
         </Form>
       </div>
+
+      {/* Attach the vanilla JS logic at the end so DOM is ready */}
+      <script dangerouslySetInnerHTML={{ __html: inlineScript }} />
+
+      <style>{`
+        .selected-card { border-color: #000; background: #f9fafb; }
+      `}</style>
     </div>
   );
 }
 
 /* ---------- Small components ---------- */
 function Field({
+  id,
   label,
   name,
   type = "text",
-  required,
   readOnly,
   defaultValue,
-  error,
   className = "",
 }: {
+  id?: string;
   label: string;
   name: string;
   type?: "text" | "email" | "date";
-  required?: boolean;
   readOnly?: boolean;
   defaultValue?: string;
-  error?: string;
   className?: string;
 }) {
   return (
-    <label className={`text-sm ${className}`}>
+    <label className={`text-sm ${className}`} htmlFor={id}>
       <span className="text-gray-800 font-medium">{label}</span>
       <input
+        id={id}
         name={name}
         type={type}
-        required={required}
         readOnly={readOnly}
         defaultValue={defaultValue}
-        className={`mt-1 w-full rounded-md ${error ? "border-red-300" : "border-gray-300"} ${
-          readOnly ? "bg-gray-50 text-gray-700" : ""
-        }`}
+        className={`mt-1 w-full rounded-md ${readOnly ? "bg-gray-50 text-gray-700" : "border-gray-300"} border`}
       />
-      {error && <span className="mt-1 block text-xs text-red-600">{error}</span>}
     </label>
   );
-}
-
-function Spinner() {
-  return <span aria-hidden className="inline-block h-3 w-3 animate-spin rounded-full border border-gray-300 border-t-gray-700" />;
-}
-
-function StatusDot({ status }: { status: FingerStatus }) {
-  const color =
-    status === "success" ? "bg-green-500" : status === "fail" ? "bg-red-500" : status === "scanning" ? "bg-amber-500" : "bg-gray-400";
-  return <span className={`inline-block h-2.5 w-2.5 rounded-full ${color}`} aria-hidden />;
 }
