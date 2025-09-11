@@ -1,108 +1,55 @@
-#include <Adafruit_Fingerprint.h>
+#include <Arduino.h>
 #include <HardwareSerial.h>
 #include <WiFi.h>
 #include <HTTPClient.h>
-#include <ArduinoJson.h>
+#include <Adafruit_Fingerprint.h>
 
-/* =========================================
- *            CONFIGURATION
- * ========================================= */
-
+/* ============================ CONFIG ============================ */
 // ---------- Wi-Fi ----------
-const char* WIFI_SSID     = "Menuka";
-const char* WIFI_PASSWORD = "menuka123";
+const char* WIFI_SSID     = "Dialog 4G 175";
+const char* WIFI_PASSWORD = "eEafA9f3";
 
 // ---------- Backend ----------
-const char* BASE_URL              = "http://192.168.9.88:8000";
-const char* VERIFY_ENDPOINT       = "/api/fingerprint/verify";
-const char* CAST_MPC_ENDPOINT     = "/api/vote/cast_mpc";
-const char* SCAN_BUFFER_ENDPOINT  = "/api/fingerprint/scan"; // polled by web UI
+const char* BASE_URL              = "http://192.168.8.106:8000";
+const char* SCAN_BUFFER_ENDPOINT  = "/api/fingerprint/scan";       // POST {"fingerprint":"ID"}, DELETE to clear
+const char* VERIFY_ENDPOINT       = "/api/fingerprint/verify";     // POST {"fingerprint":"ID"}
+const char* CAST_MPC_ENDPOINT     = "/api/fingerprint/scan";          // POST {"fingerprint":"ID","vote_id":X,"party_id":Y}
 
-// ---------- Mode ----------
+// ---------- Station Mode ----------
 enum RunMode : uint8_t { REGISTER_STATION = 0, VOTE_STATION = 1 };
-RunMode RUN_MODE = REGISTER_STATION;   // <— set default here
+RunMode RUN_MODE = VOTE_STATION;   // change to VOTE_STATION when using for voting
 
-// Optional: hold this pin LOW at boot to toggle mode
-const int MODE_BUTTON_PIN = -1; // e.g. 0 or 12; -1 to disable
+// Vote context (used only in VOTE_STATION)
+const int VOTE_ID  = 1;
+const int PARTY_ID = 1;
 
-// ---------- Vote Context (used in VOTE_STATION) ----------
-const int   VOTE_ID  = 1;
-const int   PARTY_ID = 1; // station-specific selection
-
-// ---------- Fingerprint Sensor (ESP32 UART2) ----------
-static const int FP_RX_PIN = 13;   // Sensor TX -> ESP32 RX
-static const int FP_TX_PIN = 14;   // Sensor RX -> ESP32 TX
+// ---------- Fingerprint Sensor on ESP32 UART2 (CROSS TX/RX) ----------
+// Sensor TX -> ESP32 RX2, Sensor RX -> ESP32 TX2
+// Choose pins you wired: (13,14) or (16,17) or (27,26). Keep baud 57600 unless you changed sensor’s baud.
+static const int FP_RX_PIN = 27;      // ESP32 RX2  (sensor TX -> here)
+static const int FP_TX_PIN = 26;      // ESP32 TX2  (sensor RX <- here)
 static const uint32_t FP_BAUD = 57600;
 
-// ---------- HTTP Settings ----------
+// ---------- HTTP ----------
 static const uint32_t HTTP_TIMEOUT_MS       = 8000;
 static const int      HTTP_MAX_RETRIES      = 3;
-static const uint32_t HTTP_RETRY_BACKOFF_MS = 250; // base backoff (exponential)
+static const uint32_t HTTP_RETRY_BACKOFF_MS = 300;
 
-// ---------- Behavior ----------
-static const uint32_t COOLDOWN_MS_AFTER_SUCCESS = 1200;
-static const uint32_t COOLDOWN_MS_AFTER_ERROR   = 600;
+// ---------- Behavior tweaks ----------
+static const uint32_t ENROLL_FIRST_TIMEOUT_MS  = 15000;  // wait up to 15s finger on #1
+static const uint32_t ENROLL_SECOND_TIMEOUT_MS = 15000;  // wait up to 15s finger on #2
+static const uint32_t COOLDOWN_OK_MS           = 1200;
+static const uint32_t COOLDOWN_ERR_MS          = 700;
 
-// ---------- LED (optional) ----------
-const int LED_PIN = 2;  // Onboard LED; set -1 to disable
+// ---------- Optional LED ----------
+const int LED_PIN = 2; // -1 to disable
 
-/* =========================================
- *                GLOBALS
- * ========================================= */
-
+/* ============================ GLOBALS ============================ */
 HardwareSerial FPSerial(2);
 Adafruit_Fingerprint finger(&FPSerial);
 
-uint32_t lastConnectAttempt = 0;
 bool wifiOK = false;
-
-/* =========================================
- *               WIFI HELPERS
- * ========================================= */
-
-void wifiStatusLog(wl_status_t s) {
-  switch (s) {
-    case WL_IDLE_STATUS:       Serial.println("WiFi: IDLE"); break;
-    case WL_NO_SSID_AVAIL:     Serial.println("WiFi: SSID UNAVAILABLE"); break;
-    case WL_SCAN_COMPLETED:    Serial.println("WiFi: SCAN COMPLETE"); break;
-    case WL_CONNECTED:         Serial.println("WiFi: CONNECTED"); break;
-    case WL_CONNECT_FAILED:    Serial.println("WiFi: CONNECT FAILED"); break;
-    case WL_CONNECTION_LOST:   Serial.println("WiFi: CONNECTION LOST"); break;
-    case WL_DISCONNECTED:      Serial.println("WiFi: DISCONNECTED"); break;
-    default:                   Serial.printf("WiFi: STATUS %d\n", (int)s);
-  }
-}
-
-void ensureWiFi() {
-  if (WiFi.status() == WL_CONNECTED) { wifiOK = true; return; }
-  wifiOK = false;
-
-  if (millis() - lastConnectAttempt < 2000) return;
-  lastConnectAttempt = millis();
-
-  Serial.printf("🔌 Connecting Wi-Fi: %s\n", WIFI_SSID);
-  WiFi.mode(WIFI_STA);
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-
-  uint32_t start = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - start < 10000) {
-    delay(300);
-    Serial.print(".");
-  }
-  Serial.println();
-  wifiStatusLog(WiFi.status());
-
-  if (WiFi.status() == WL_CONNECTED) {
-    wifiOK = true;
-    Serial.print("📶 IP: "); Serial.println(WiFi.localIP());
-  } else {
-    Serial.println("❌ Wi-Fi connect failed.");
-  }
-}
-
-/* =========================================
- *               HTTP HELPERS
- * ========================================= */
+uint32_t lastConnectAttemptMs = 0;
 
 struct HttpResult {
   bool ok;
@@ -110,267 +57,8 @@ struct HttpResult {
   String body;
 };
 
-HttpResult httpRequest(const String& url, const String& method, const String& body = String()) {
-  HttpResult result{false, -1, ""};
-
-  for (int attempt = 1; attempt <= HTTP_MAX_RETRIES; ++attempt) {
-    if (WiFi.status() != WL_CONNECTED) ensureWiFi();
-    if (WiFi.status() != WL_CONNECTED) { delay(200); continue; }
-
-    HTTPClient http;
-    http.setTimeout(HTTP_TIMEOUT_MS);
-    http.setReuse(true);
-
-    if (!http.begin(url)) {
-      Serial.printf("❌ HTTP begin failed (attempt %d/%d)\n", attempt, HTTP_MAX_RETRIES);
-      delay(HTTP_RETRY_BACKOFF_MS * attempt);
-      continue;
-    }
-
-    int code = -1;
-    if (method == "GET" || method == "DELETE") {
-      code = (method == "GET") ? http.GET() : http.sendRequest("DELETE");
-    } else {
-      http.addHeader("Content-Type", "application/json");
-      http.addHeader("Connection", "keep-alive");
-      code = http.sendRequest(method.c_str(), (uint8_t*)body.c_str(), body.length());
-    }
-
-    String resp = http.getString();
-    http.end();
-
-    result.ok = (code > 0);
-    result.status = code;
-    result.body = resp;
-
-    if (!result.ok) {
-      Serial.printf("❌ HTTP %s error: %d (attempt %d/%d)\n", method.c_str(), code, attempt, HTTP_MAX_RETRIES);
-      delay(HTTP_RETRY_BACKOFF_MS * attempt);
-      continue;
-    }
-    return result;
-  }
-  return result;
-}
-
-HttpResult httpPostJson(const String& url, const String& jsonBody) {
-  return httpRequest(url, "POST", jsonBody);
-}
-
-String buildJson(const JsonDocument& doc) {
-  String out;
-  serializeJson(doc, out);
-  return out;
-}
-
-/* =========================================
- *              BACKEND CALLS
- * ========================================= */
-
-bool apiVerifyFingerprint(uint16_t fpId, String& userNameOut, String& nicOut, String& errOut) {
-  userNameOut = ""; nicOut = ""; errOut = "";
-
-  StaticJsonDocument<128> doc;
-  doc["fingerprint"] = fpId;
-  const String url = String(BASE_URL) + VERIFY_ENDPOINT;
-
-  HttpResult res = httpPostJson(url, buildJson(doc));
-  Serial.printf("📡 Verify HTTP %d: %s\n", res.status, res.body.c_str());
-
-  if (!res.ok || res.status != 200) { errOut = "verify_http_" + String(res.status); return false; }
-
-  StaticJsonDocument<512> out;
-  auto err = deserializeJson(out, res.body);
-  if (err) { errOut = "verify_parse"; return false; }
-
-  const char* statusStr = out["status"] | "";
-  if (String(statusStr) != "success") { errOut = out["message"] | "verify_failed"; return false; }
-
-  userNameOut = String(out["user"]["full_name"] | "");
-  nicOut      = String(out["user"]["nic"] | "");
-  return true;
-}
-
-bool apiCastVoteMPC(uint16_t fpId, int voteId, int partyId, String& errOut) {
-  errOut = "";
-  StaticJsonDocument<160> doc;
-  doc["fingerprint"] = fpId;
-  doc["vote_id"]     = voteId;
-  doc["party_id"]    = partyId;
-
-  const String url = String(BASE_URL) + CAST_MPC_ENDPOINT;
-  HttpResult res = httpPostJson(url, buildJson(doc));
-  Serial.printf("📡 Cast MPC HTTP %d: %s\n", res.status, res.body.c_str());
-
-  if (!res.ok) { errOut = "cast_http_err"; return false; }
-  if (res.status != 200) {
-    if (res.status == 409) errOut = "already_voted";
-    else if (res.status == 403) errOut = "not_open";
-    else if (res.status == 404) errOut = "vote_or_party_missing";
-    else errOut = "cast_http_" + String(res.status);
-    return false;
-  }
-
-  // If server returned 200, accept it (payload tolerant)
-  return true;
-}
-
-// Publish to the same buffer your web UI polls (registration/public vote pages)
-bool apiPublishScan(uint16_t fpId, String& errOut) {
-  errOut = "";
-  StaticJsonDocument<128> doc;
-  doc["fingerprint"] = fpId;
-
-  const String url = String(BASE_URL) + SCAN_BUFFER_ENDPOINT;
-  HttpResult res = httpPostJson(url, buildJson(doc));
-  Serial.printf("📡 Publish Scan HTTP %d: %s\n", res.status, res.body.c_str());
-
-  if (!res.ok)  { errOut = "scan_http_err"; return false; }
-  if (res.status != 200) { errOut = "scan_http_" + String(res.status); return false; }
-  return true;
-}
-
-void apiClearScanBuffer() {
-  const String url = String(BASE_URL) + SCAN_BUFFER_ENDPOINT;
-  HttpResult res = httpRequest(url, "DELETE");
-  Serial.printf("🧹 Clear Buffer HTTP %d\n", res.status);
-}
-
-/* =========================================
- *           FINGERPRINT HELPERS
- * ========================================= */
-
-void waitNoFinger() {
-  // wait until finger is removed
-  uint32_t guard = millis();
-  while (finger.getImage() != FINGERPRINT_NOFINGER) {
-    if (millis() - guard > 3000) break;
-    delay(50);
-  }
-}
-
-bool captureImageToBuffer(uint8_t slot /*1 or 2*/) {
-  int p = -1;
-  uint32_t start = millis();
-  while ((p = finger.getImage()) != FINGERPRINT_OK) {
-    if (p != FINGERPRINT_NOFINGER && p != FINGERPRINT_IMAGEFAIL) {
-      Serial.printf("⚠️ getImage err: 0x%02X\n", p);
-    }
-    if (millis() - start > 10000) return false; // 10s timeout
-    delay(50);
-  }
-
-  p = finger.image2Tz(slot);
-  if (p != FINGERPRINT_OK) {
-    Serial.printf("⚠️ image2Tz(%d) err: 0x%02X\n", slot, p);
-    return false;
-  }
-  return true;
-}
-
-// Find next free template slot: prefer templateCount+1, then probe forward
-int16_t findNextFreeId() {
-  // fetch system params so templateCount/capacity are current
-  finger.getParameters();      // ignore return; library fills fields when connected
-  finger.getTemplateCount();   // fills finger.templateCount
-
-  int16_t cap = finger.capacity ? finger.capacity : 200; // default fallback
-  int16_t startId = finger.templateCount + 1;
-  if (startId < 1) startId = 1;
-
-  for (int16_t id = startId; id <= cap; ++id) {
-    // loadModel OK => occupied; BADLOCATION => free; others => comm err (skip forward)
-    uint8_t r = finger.loadModel(id);
-    if (r == FINGERPRINT_OK) continue;                // already used
-    if (r == FINGERPRINT_BADLOCATION) return id;      // free slot
-    // Any other error, try next
-  }
-
-  // If we didn’t find one after templateCount+1..cap, try 1..startId-1 (wrap)
-  for (int16_t id = 1; id < startId; ++id) {
-    uint8_t r = finger.loadModel(id);
-    if (r == FINGERPRINT_OK) continue;
-    if (r == FINGERPRINT_BADLOCATION) return id;
-  }
-  return -1; // none
-}
-
-bool enrollNewFinger(uint16_t &newIdOut) {
-  newIdOut = 0;
-
-  Serial.println("🧩 ENROLL: Place finger (scan #1)...");
-  if (!captureImageToBuffer(1)) { Serial.println("❌ Failed first capture."); return false; }
-
-  Serial.println("↗️  Remove finger...");
-  waitNoFinger();
-
-  Serial.println("🧩 ENROLL: Place same finger again (scan #2)...");
-  if (!captureImageToBuffer(2)) { Serial.println("❌ Failed second capture."); return false; }
-
-  int p = finger.createModel();
-  if (p != FINGERPRINT_OK) {
-    Serial.printf("❌ createModel err: 0x%02X (images didn’t match?)\n", p);
-    return false;
-  }
-
-  int16_t id = findNextFreeId();
-  if (id < 1) {
-    Serial.println("❌ No free template slots.");
-    return false;
-  }
-
-  // Try storing, probe forward a bit if needed
-  for (int tries = 0; tries < 5; ++tries) {
-    p = finger.storeModel(id);
-    if (p == FINGERPRINT_OK) {
-      newIdOut = id;
-      Serial.printf("✅ Enrolled at ID=%d\n", id);
-      return true;
-    }
-    Serial.printf("⚠️ storeModel(%d) err: 0x%02X, trying next...\n", id, p);
-    id++;
-  }
-
-  Serial.println("❌ Could not store template.");
-  return false;
-}
-
-bool matchOnce(uint16_t &matchedId, uint16_t &conf) {
-  matchedId = 0; conf = 0;
-
-  int p = finger.getImage();
-  if (p != FINGERPRINT_OK) {
-    if (p != FINGERPRINT_NOFINGER) Serial.printf("⚠️ getImage err: 0x%02X\n", p);
-    return false;
-  }
-
-  p = finger.image2Tz();
-  if (p != FINGERPRINT_OK) {
-    Serial.printf("⚠️ image2Tz err: 0x%02X\n", p);
-    return false;
-  }
-
-  p = finger.fingerFastSearch();
-  if (p != FINGERPRINT_OK) {
-    if (p == FINGERPRINT_NOTFOUND) Serial.println("❌ Finger not found in sensor.");
-    else Serial.printf("⚠️ fingerFastSearch err: 0x%02X\n", p);
-    return false;
-  }
-
-  matchedId = finger.fingerID;
-  conf = finger.confidence;
-  return true;
-}
-
-/* =========================================
- *                 SETUP
- * ========================================= */
-
-void ledInit() {
-  if (LED_PIN >= 0) { pinMode(LED_PIN, OUTPUT); digitalWrite(LED_PIN, LOW); }
-}
-
-void ledBlink(int times, int onMs = 60, int offMs = 60) {
+/* ============================ HELPERS ============================ */
+void ledBlink(int times, int onMs = 70, int offMs = 120) {
   if (LED_PIN < 0) return;
   for (int i = 0; i < times; ++i) {
     digitalWrite(LED_PIN, HIGH); delay(onMs);
@@ -378,23 +66,236 @@ void ledBlink(int times, int onMs = 60, int offMs = 60) {
   }
 }
 
-void maybeToggleModeAtBoot() {
-  if (MODE_BUTTON_PIN < 0) return;
-  pinMode(MODE_BUTTON_PIN, INPUT_PULLUP);
-  delay(10);
-  if (digitalRead(MODE_BUTTON_PIN) == LOW) {
-    RUN_MODE = (RUN_MODE == REGISTER_STATION) ? VOTE_STATION : REGISTER_STATION;
-    Serial.printf("🔁 Mode toggled. Now: %s\n", RUN_MODE == REGISTER_STATION ? "REGISTER_STATION" : "VOTE_STATION");
-    delay(500);
+void ensureWiFi() {
+  if (WiFi.status() == WL_CONNECTED) { wifiOK = true; return; }
+  wifiOK = false;
+
+  if (millis() - lastConnectAttemptMs < 2000) return; // don’t spam
+  lastConnectAttemptMs = millis();
+
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+
+  uint32_t t0 = millis();
+  while (WiFi.status() != WL_CONNECTED && (millis() - t0) < 15000) {
+    delay(300);
+  }
+  wifiOK = (WiFi.status() == WL_CONNECTED);
+  if (wifiOK) {
+    Serial.print("📶 IP: "); Serial.println(WiFi.localIP());
+  } else {
+    Serial.println("⚠ Wi-Fi not connected yet.");
   }
 }
 
+HttpResult httpRequest(const String& url, const char* method, const String& body = String()) {
+  HttpResult res{false, -1, ""};
+
+  for (int attempt = 1; attempt <= HTTP_MAX_RETRIES; ++attempt) {
+    ensureWiFi();
+    if (WiFi.status() != WL_CONNECTED) { delay(HTTP_RETRY_BACKOFF_MS * attempt); continue; }
+
+    HTTPClient http;
+    http.setTimeout(HTTP_TIMEOUT_MS);
+    http.setReuse(false); // be conservative on small APs
+
+    Serial.printf("🌐 %s %s (attempt %d/%d)\n", method, url.c_str(), attempt, HTTP_MAX_RETRIES);
+
+    if (!http.begin(url)) {
+      Serial.println("❌ http.begin() failed");
+      delay(HTTP_RETRY_BACKOFF_MS * attempt);
+      continue;
+    }
+
+    int code = -1;
+    if (strcmp(method, "GET") == 0) {
+      code = http.GET();
+    } else if (strcmp(method, "DELETE") == 0) {
+      code = http.sendRequest("DELETE");
+    } else {
+      http.addHeader("Content-Type", "application/json");
+      http.addHeader("Connection", "close");
+      code = http.sendRequest(method, (uint8_t*)body.c_str(), body.length());
+    }
+
+    res.status = code;
+    res.body   = http.getString();
+    http.end();
+
+    if (code > 0) {
+      res.ok = true;
+      Serial.printf("✅ HTTP %d\n", code);
+      return res;
+    } else {
+      Serial.printf("❌ HTTP error: %d\n", code);
+      delay(HTTP_RETRY_BACKOFF_MS * attempt);
+    }
+  }
+  return res;
+}
+
+/* ---------- Backend calls ---------- */
+bool apiPublishScan(uint16_t fpId, String& errOut) {
+  errOut = "";
+  const String url = String(BASE_URL) + SCAN_BUFFER_ENDPOINT;
+  // send as STRING to avoid 422
+  const String payload = String("{\"fingerprint\":\"") + String(fpId) + String("\"}");
+
+  HttpResult r = httpRequest(url, "POST", payload);
+  if (!r.ok)                 { errOut = "net_error"; return false; }
+  if (r.status != 200 && r.status != 201) { errOut = String("http_") + String(r.status); return false; }
+  return true;
+}
+
+void apiClearScanBuffer() {
+  const String url = String(BASE_URL) + SCAN_BUFFER_ENDPOINT;
+  (void)httpRequest(url, "DELETE");
+}
+
+bool apiVerify(String fpStr /* always string */, String& nameOut, String& nicOut, String& errOut) {
+  nameOut = ""; nicOut = ""; errOut = "";
+  const String url = String(BASE_URL) + VERIFY_ENDPOINT;
+  const String payload = String("{\"fingerprint\":\"") + fpStr + String("\"}");
+
+  HttpResult r = httpRequest(url, "POST", payload);
+  if (!r.ok)                 { errOut = "net_error"; return false; }
+  if (r.status != 200)       { errOut = String("http_") + String(r.status); return false; }
+
+  // Tiny tolerant parse (avoid ArduinoJson). We just look for keys.
+  if (r.body.indexOf("\"status\":\"success\"") >= 0) {
+    // naive extracts (works with your backend shape)
+    int p1 = r.body.indexOf("\"full_name\"");
+    int p2 = r.body.indexOf("\"nic\"");
+    if (p1 >= 0) {
+      int q = r.body.indexOf(':', p1); int s = r.body.indexOf('"', q+1); int e = r.body.indexOf('"', s+1);
+      if (q>=0 && s>=0 && e>s) nameOut = r.body.substring(s+1, e);
+    }
+    if (p2 >= 0) {
+      int q = r.body.indexOf(':', p2); int s = r.body.indexOf('"', q+1); int e = r.body.indexOf('"', s+1);
+      if (q>=0 && s>=0 && e>s) nicOut = r.body.substring(s+1, e);
+    }
+    return true;
+  }
+  errOut = "verify_fail";
+  return false;
+}
+
+bool apiCastMPC(String fpStr, int voteId, int partyId, String& errOut) {
+  errOut = "";
+  const String url = String(BASE_URL) + CAST_MPC_ENDPOINT;
+  String payload = String("{\"fingerprint\":\"") + fpStr + String("\",\"vote_id\":") +
+                   String(voteId) + String(",\"party_id\":") + String(partyId) + String("}");
+
+  HttpResult r = httpRequest(url, "POST", payload);
+  if (!r.ok)           { errOut = "net_error"; return false; }
+  if (r.status == 409) { errOut = "already_voted"; return false; }
+  if (r.status != 200) { errOut = String("http_") + String(r.status); return false; }
+  return true;
+}
+
+/* ---------- Fingerprint helpers ---------- */
+void waitNoFinger(uint32_t timeoutMs = 3000) {
+  uint32_t t0 = millis();
+  while (finger.getImage() != FINGERPRINT_NOFINGER) {
+    if (millis() - t0 > timeoutMs) break;
+    delay(50);
+  }
+}
+
+bool captureToBuffer(uint8_t slot, uint32_t timeoutMs) {
+  uint8_t r;
+  uint32_t t0 = millis();
+  while (true) {
+    r = finger.getImage();
+    if (r == FINGERPRINT_OK) break;
+    if (r != FINGERPRINT_NOFINGER && r != FINGERPRINT_IMAGEFAIL) {
+      Serial.printf("⚠ getImage err=0x%02X\n", r);
+    }
+    if (millis() - t0 > timeoutMs) return false;
+    delay(60);
+  }
+  r = finger.image2Tz(slot);
+  if (r != FINGERPRINT_OK) {
+    Serial.printf("⚠ image2Tz(%d) err=0x%02X\n", slot, r);
+    return false;
+  }
+  return true;
+}
+
+int16_t nextIdFromCount() {
+  if (finger.getTemplateCount() != FINGERPRINT_OK) return -1;
+  int16_t n = finger.templateCount;
+  if (n < 0) n = 0;
+  return n + 1;
+}
+
+bool enrollNewFinger(uint16_t &newIdOut) {
+  newIdOut = 0;
+
+  Serial.println("▶ Scan #1 …");
+  if (!captureToBuffer(1, ENROLL_FIRST_TIMEOUT_MS)) {
+    Serial.println("⏱ timeout on scan #1");
+    return false;
+  }
+  Serial.println("↗ Remove finger…");
+  waitNoFinger();
+
+  Serial.println("▶ Scan #2 (same finger) …");
+  if (!captureToBuffer(2, ENROLL_SECOND_TIMEOUT_MS)) {
+    Serial.println("⏱ timeout on scan #2");
+    return false;
+  }
+
+  uint8_t p = finger.createModel();
+  if (p != FINGERPRINT_OK) {
+    Serial.printf("❌ createModel err=0x%02X (images mismatch?)\n", p);
+    return false;
+  }
+
+  int16_t id = nextIdFromCount();
+  if (id < 1) { Serial.println("❌ no free slot"); return false; }
+
+  for (int tries = 0; tries < 5; ++tries, ++id) {
+    p = finger.storeModel(id);
+    if (p == FINGERPRINT_OK) {
+      newIdOut = (uint16_t)id;
+      return true;
+    }
+    Serial.printf("⚠ storeModel(%d) err=0x%02X, trying next…\n", id, p);
+  }
+  return false;
+}
+
+bool matchOnce(uint16_t &matchedId, uint16_t &conf) {
+  matchedId = 0; conf = 0;
+
+  uint8_t p = finger.getImage();
+  if (p != FINGERPRINT_OK) {
+    if (p != FINGERPRINT_NOFINGER) Serial.printf("⚠ getImage err=0x%02X\n", p);
+    return false;
+  }
+
+  p = finger.image2Tz();
+  if (p != FINGERPRINT_OK) { Serial.printf("⚠ image2Tz err=0x%02X\n", p); return false; }
+
+  p = finger.fingerFastSearch();
+  if (p != FINGERPRINT_OK) {
+    if (p == FINGERPRINT_NOTFOUND) Serial.println("❌ finger not found in library");
+    else Serial.printf("⚠ fingerFastSearch err=0x%02X\n", p);
+    return false;
+  }
+
+  matchedId = finger.fingerID;
+  conf      = finger.confidence;
+  return true;
+}
+
+/* ============================ SETUP / LOOP ============================ */
 void setup() {
   Serial.begin(115200);
-  delay(300);
+  delay(250);
 
-  ledInit();
-  maybeToggleModeAtBoot();
+  if (LED_PIN >= 0) { pinMode(LED_PIN, OUTPUT); digitalWrite(LED_PIN, LOW); }
 
   // Fingerprint UART2
   FPSerial.begin(FP_BAUD, SERIAL_8N1, FP_RX_PIN, FP_TX_PIN);
@@ -404,89 +305,78 @@ void setup() {
   Serial.println("====================================");
   Serial.println("   ESP32 Fingerprint Station");
   Serial.print  ("   Mode: "); Serial.println(RUN_MODE == REGISTER_STATION ? "REGISTER_STATION" : "VOTE_STATION");
-  Serial.print  ("   Verify: "); Serial.println(VERIFY_ENDPOINT);
-  Serial.print  ("   Cast:   "); Serial.println(CAST_MPC_ENDPOINT);
-  Serial.print  ("   Buffer: "); Serial.println(SCAN_BUFFER_ENDPOINT);
+  Serial.print  ("   UART2 RX="); Serial.print(FP_RX_PIN);
+  Serial.print  (" TX="); Serial.println(FP_TX_PIN);
   Serial.println("====================================");
 
-  if (finger.verifyPassword()) {
-    Serial.println("✅ Fingerprint sensor detected.");
-    finger.getParameters();
-    finger.getTemplateCount();
-    Serial.printf("   Capacity: %d, Used: %d\n", finger.capacity, finger.templateCount);
-  } else {
-    Serial.println("❌ Fingerprint sensor NOT found. Check wiring & baud.");
-    while (true) { ledBlink(1, 50, 250); }
+  if (!finger.verifyPassword()) {
+    Serial.println("❌ Sensor NOT detected. Check power + CROSS TX/RX + baud 57600.");
+    while (true) { ledBlink(1, 60, 240); delay(280); }
+  }
+
+  if (finger.getParameters() == FINGERPRINT_OK) {
+    (void)finger.getTemplateCount();
+    Serial.printf("✅ Sensor OK. Capacity=%d, Used=%d\n", finger.capacity, finger.templateCount);
   }
 
   ensureWiFi();
   if (wifiOK) {
-    Serial.println("📘 Ready.");
-    if (RUN_MODE == VOTE_STATION) {
-      Serial.printf("🗳  Vote ID = %d | Party ID = %d\n", VOTE_ID, PARTY_ID);
-    } else {
-      // Clear buffer so the web page won’t pick an old ID
+    if (RUN_MODE == REGISTER_STATION) {
+      // Clear buffer at boot for fresh scans
       apiClearScanBuffer();
     }
   }
 }
-
-/* =========================================
- *                 LOOP
- * ========================================= */
 
 void loop() {
   ensureWiFi();
   if (!wifiOK) { delay(300); return; }
 
   if (RUN_MODE == REGISTER_STATION) {
-    Serial.println("🧩 Registration: place finger to ENROLL.");
+    Serial.println("🧩 Place finger to ENROLL (two scans)...");
     uint16_t newId = 0;
+
     if (!enrollNewFinger(newId)) {
       Serial.println("❌ Enrollment failed.\n");
-      ledBlink(1, 30, 200);
-      delay(COOLDOWN_MS_AFTER_ERROR);
+      ledBlink(1); delay(COOLDOWN_ERR_MS);
       return;
     }
 
-    Serial.printf("📤 Publishing new ID=%u to buffer…\n", newId);
+    Serial.printf("✅ Enrolled at ID=%u\n", newId);
+    Serial.printf("📤 Publishing ID=%u to %s …\n", newId, SCAN_BUFFER_ENDPOINT);
+
     String err;
     if (apiPublishScan(newId, err)) {
-      Serial.println("✅ ID published. Proceed with web registration form.\n");
-      ledBlink(3, 50, 80);
-      delay(COOLDOWN_MS_AFTER_SUCCESS);
+      Serial.println("✅ Published. Finish the form on the web UI.\n");
+      ledBlink(3); delay(COOLDOWN_OK_MS);
     } else {
       Serial.printf("❌ Publish failed: %s\n\n", err.c_str());
-      ledBlink(1, 30, 200);
-      delay(COOLDOWN_MS_AFTER_ERROR);
+      ledBlink(1); delay(COOLDOWN_ERR_MS);
     }
     return;
   }
 
-  // ---- VOTE_STATION ----
+  // ----- VOTE_STATION -----
   Serial.println("🖐 Place finger to VOTE…");
   uint16_t fid = 0, conf = 0;
   if (!matchOnce(fid, conf)) { delay(150); return; }
   Serial.printf("✅ Match: ID=%u (conf=%u)\n", fid, conf);
 
-  // Verify the user exists, then cast the vote
   String name, nic, err;
-  if (!apiVerifyFingerprint(fid, name, nic, err)) {
+  if (!apiVerify(String(fid), name, nic, err)) {
     Serial.printf("❌ Verify failed: %s\n", err.c_str());
-    ledBlink(1, 30, 200);
-    delay(COOLDOWN_MS_AFTER_ERROR);
+    ledBlink(1); delay(COOLDOWN_ERR_MS);
     return;
   }
 
   Serial.printf("👤 %s | 🪪 %s\n", name.c_str(), nic.c_str());
-  Serial.printf("🗳  Casting vote (vote_id=%d, party_id=%d)…\n", VOTE_ID, PARTY_ID);
-  if (apiCastVoteMPC(fid, VOTE_ID, PARTY_ID, err)) {
+  Serial.printf("🗳 Casting vote (vote_id=%d, party_id=%d)…\n", VOTE_ID, PARTY_ID);
+
+  if (apiCastMPC(String(fid), VOTE_ID, PARTY_ID, err)) {
     Serial.println("✅ Vote recorded.\n");
-    ledBlink(3, 50, 80);
-    delay(COOLDOWN_MS_AFTER_SUCCESS);
+    ledBlink(3); delay(COOLDOWN_OK_MS);
   } else {
     Serial.printf("❌ Vote failed: %s\n\n", err.c_str());
-    ledBlink(1, 30, 200);
-    delay(COOLDOWN_MS_AFTER_ERROR);
+    ledBlink(1); delay(COOLDOWN_ERR_MS);
   }
 }

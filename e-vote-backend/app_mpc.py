@@ -20,13 +20,13 @@ ALLOW_COORD = os.getenv("ALLOW_COORD_ORIGIN", "")
 COORD_DB = {
     "host": os.getenv("COORD_DB_HOST", "linux-us.genixplay.com"),
     "user": os.getenv("COORD_DB_USER", "root"),
-    "password": os.getenv("COORD_DB_PASS", "Sethu2008!!"),
+    "password": os.getenv("COORD_DB_PASS", ""),
     "database": os.getenv("COORD_DB_NAME", "voter_db"),
 }
 SHARE_DB = {
     "host": os.getenv("SHARE_DB_HOST", "linux-us.genixplay.com"),
     "user": os.getenv("SHARE_DB_USER", "root"),
-    "password": os.getenv("SHARE_DB_PASS", "Sethu2008!!"),
+    "password": os.getenv("SHARE_DB_PASS", ""),
     "database": os.getenv("SHARE_DB_NAME", "voter_shares"),
 }
 

@@ -1,3 +1,14 @@
+# E-Vote Project
+
+## Backend Setup & Run
+
+cd e-vote-backend
+# install dependencies
+pip install -r requirements.txt
+# run backend server
+uvicorn main:app --reload --host 0.0.0.0 --port 8000
+
+
 # Welcome to Remix!
 
 - 📖 [Remix docs](https://remix.run/docs)

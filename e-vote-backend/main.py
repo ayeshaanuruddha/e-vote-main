@@ -2,7 +2,7 @@
 from fastapi import FastAPI, HTTPException, Request, Path, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, EmailStr, Field
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Union
 import mysql.connector
 from mysql.connector import pooling
 from datetime import datetime, timezone
@@ -67,10 +67,11 @@ class RegisterRequest(BaseModel):
     fingerprint: Optional[str] = None
 
 class FingerprintPayload(BaseModel):
-    fingerprint: str = Field(min_length=1)
+    # accept "123" or 123
+    fingerprint: Union[str, int]
 
 class FingerVerifyPayload(BaseModel):
-    fingerprint: str = Field(min_length=1)
+    fingerprint: Union[str, int]
 
 class AdminLoginPayload(BaseModel):
     email: EmailStr
@@ -137,6 +138,17 @@ def _validate_party_fields(name: Optional[str], code: Optional[str], symbol_url:
         su = symbol_url.strip()
         if not (su.startswith("http://") or su.startswith("https://")):
             raise HTTPException(status_code=400, detail="symbol_url must start with http:// or https://")
+        
+
+# ---------------- Helpers (new) ----------------
+def _normalize_fp(val: Union[str, int, None]) -> str:
+    """Return a non-empty string version of the fingerprint value."""
+    if val is None:
+        raise HTTPException(status_code=400, detail="Fingerprint is required")
+    s = str(val).strip()
+    if not s:
+        raise HTTPException(status_code=400, detail="Fingerprint is required")
+    return s
 
 # ---------------- Health ----------------
 @app.get("/health")
@@ -175,15 +187,21 @@ def admin_login(data: AdminLoginPayload):
     finally:
         cur.close(); conn.close()
 
-# ---------------- Fingerprint APIs ----------------
+# ---------------- Fingerprint APIs (updated) ----------------
 @app.post("/api/fingerprint/scan")
 def scan_fingerprint(data: FingerprintPayload):
-    set_fingerprint(data.fingerprint)
-    return {"status": "success"}
+    fp = _normalize_fp(data.fingerprint)
+    set_fingerprint(fp)
+    # helpful to log/inspect what was buffered
+    return {"status": "success", "fingerprint": fp, "updated_at": fingerprint_storage["updated_at"]}
 
 @app.get("/api/fingerprint/scan")
 def get_fingerprint_api():
-    return get_fingerprint()
+    # always return the buffered value as a string
+    j = get_fingerprint()
+    if j["fingerprint"] is not None:
+        j["fingerprint"] = str(j["fingerprint"])
+    return j
 
 @app.delete("/api/fingerprint/scan")
 def clear_fingerprint():
@@ -192,11 +210,12 @@ def clear_fingerprint():
 
 @app.post("/api/fingerprint/verify")
 def verify_fingerprint(data: FingerVerifyPayload):
+    fp = _normalize_fp(data.fingerprint)
     conn, cur = db()
     try:
         cur.execute(
             "SELECT id, full_name, nic, email FROM users WHERE fingerprint = %s",
-            (data.fingerprint,),
+            (fp,),
         )
         row = cur.fetchone()
         if row:
