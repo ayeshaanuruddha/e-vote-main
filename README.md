@@ -12,7 +12,7 @@ Biometric Authentication: Integration with a fingerprint scanner for secure vote
 
 Microservices Design: The system is built with a modular architecture for scalability and maintainability.
 
-Backend Setup & Run
+# Backend Setup & Run
 The backend API is built with Python and the FastAPI framework.
 
 cd e-vote-backend
