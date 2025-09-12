@@ -1,4 +1,5 @@
-Edge-Based E-Voting System with Multi-Party Computation (MPC)
+# Edge-Based E-Voting System with Multi-Party Computation (MPC)
+
 This project, "Edge-Based E-Voting System with Multi-Party Computation (MPC): A Privacy-Preserving Framework for Sri Lanka," is a research prototype developed to address the challenges of traditional, paper-based voting systems. It leverages Edge Computing and Multi-Party Computation (MPC) to create a secure, efficient, and privacy-preserving e-voting framework suitable for environments with limited infrastructure.
 
 The system is comprised of a FastAPI backend and a Remix frontend, designed to work with an ESP32 or Raspberry Pi as an edge device. The core objective is to ensure the Confidentiality, Integrity, Availability, Authentication, and Non-repudiation (CIAAN) of the electoral process while building public trust in digital voting.
