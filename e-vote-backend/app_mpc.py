@@ -9,6 +9,8 @@ import mysql.connector
 import requests
 from passlib.hash import bcrypt
 
+#Scalable for a Multi-device / multinode approach.
+
 # =========================
 # Modes & Config
 # =========================
