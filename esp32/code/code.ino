@@ -6,11 +6,11 @@
 
 /* ============================ CONFIG ============================ */
 // ---------- Wi-Fi ----------
-const char* WIFI_SSID     = "Dialog 4G 175";
-const char* WIFI_PASSWORD = "eEafA9f3";
+const char* WIFI_SSID     = "Dialog 4G 175"; // Change Accordingly
+const char* WIFI_PASSWORD = "eEafA9f3"; //Change Accordingly
 
 // ---------- Backend ----------
-const char* BASE_URL              = "http://192.168.8.106:8000";
+const char* BASE_URL              = "http://192.168.8.106:8000"; //Base URL is to be changed according to IPV4 of Local Machine
 const char* SCAN_BUFFER_ENDPOINT  = "/api/fingerprint/scan";       // POST {"fingerprint":"ID"}, DELETE to clear
 const char* VERIFY_ENDPOINT       = "/api/fingerprint/verify";     // POST {"fingerprint":"ID"}
 const char* CAST_MPC_ENDPOINT     = "/api/fingerprint/scan";          // POST {"fingerprint":"ID","vote_id":X,"party_id":Y}
